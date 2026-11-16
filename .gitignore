@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Local deployment settings (may contain private LAN addresses)
+clients.txt
+
+# Artifacts / recordings / camera calibration
+*.mp4
+*.avi
+*.mkv
+*.ts
+*.pt
+*.onnx
+*.engine
+*.log
+screenshots/
+recordings/
+calibration.local.*
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
