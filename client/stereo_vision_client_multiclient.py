@@ -256,6 +256,8 @@ def main():
     p.add_argument('--no-preview', action='store_true')
     p.add_argument('--self-test', action='store_true')
     p.add_argument('--report-seconds', type=float, default=5.0)
+    p.add_argument('--display-mode', choices=['both','left','right'], default='both',
+                   help='Initial viewer layout (only affects local display)')
     args = p.parse_args()
     if args.self_test:
         self_test()
@@ -276,6 +278,8 @@ def main():
     started = time.monotonic()
     last_preview = None
     closing = False
+    display_mode = args.display_mode
+    fullscreen = False
     root = None
     panel = None
     if not args.no_preview:
@@ -291,6 +295,20 @@ def main():
                 name = f'stereo_client_{int(time.time())}.png'
                 last_preview.save(name)
                 print('Saved', name, flush=True)
+        def change_view(mode):
+            nonlocal display_mode
+            display_mode = mode
+
+        def toggle_fullscreen(event=None):
+            nonlocal fullscreen
+            fullscreen = not fullscreen
+            root.attributes('-fullscreen', fullscreen)
+
+        root.bind('<KeyPress-1>', lambda event: change_view('both'))
+        root.bind('<KeyPress-2>', lambda event: change_view('left'))
+        root.bind('<KeyPress-3>', lambda event: change_view('right'))
+        root.bind('<KeyPress-f>', toggle_fullscreen)
+        root.bind('<KeyPress-F>', toggle_fullscreen)
         root.bind('<KeyPress-q>', quit_app)
         root.bind('<KeyPress-Q>', quit_app)
         root.bind('<Escape>', quit_app)
@@ -333,7 +351,9 @@ def main():
                     last_preview = make_preview(frame, stamp, args.port, count, valid, invalid,
                                                 skipped, age_ms, age_right_ms,
                                                 recent_ages, recent_offsets, last_issue,
-                                                args.clock_offset_ms)
+                                                args.clock_offset_ms,
+                                                screen_size=(root.winfo_screenwidth(), root.winfo_screenheight()),
+                                                display_mode=display_mode)
                     photo = ImageTk.PhotoImage(last_preview, master=root)
                     panel.configure(image=photo)
                     panel.image = photo
@@ -357,57 +377,85 @@ def main():
 
 
 def make_preview(frame, stamp, port, count, valid, invalid, skipped,
-                 age_ms, age_right_ms, recent_ages, recent_offsets, last_issue, clock_offset_ms):
-    """All image composition/drawing/scaling is Pillow; no OpenCV display path."""
+                 age_ms, age_right_ms, recent_ages, recent_offsets, last_issue,
+                 clock_offset_ms, screen_size=None, display_mode='both'):
+    """Responsive preview. Scale VIDEO only; render HUD text at display resolution.
+
+    Does not affect the incoming video, timestamp decoder or screenshot source.
+    """
     h, w = frame.shape[:2]
     if h < 1 or w < 1:
         raise ValueError(f'Invalid decoded video frame dimensions: {w}x{h}')
-    # Decoded GStreamer frame is BGR; Pillow requires RGB.
-    frame_rgb = Image.fromarray(np.ascontiguousarray(frame[:, :, ::-1]), mode='RGB')
-    hud = Image.new('RGB', (w, 250), (0, 0, 0))
+    if screen_size is None:
+        screen_size = (1920, 1080)
+    sw, sh = screen_size
+    target_w = min(w, max(500, sw - 65))
+    target_h = max(260, sh - 120)
+    # The binary timestamp is in the last 100 pixels of the ORIGINAL frame.
+    # The decoder has already read it; do not unnecessarily display tiny pixels.
+    video_h = max(1, h - 100)
+    video = frame[:video_h]
+    half = w // 2
+    if display_mode == 'left':
+        video = video[:, :half]
+    elif display_mode == 'right':
+        video = video[:, half:]
+    source_rgb = Image.fromarray(np.ascontiguousarray(video[:, :, ::-1]), mode='RGB')
+    hud_height = min(285, max(215, round(target_h * .26)))
+    video_limit = max(160, target_h - hud_height)
+    scale = min(target_w / source_rgb.width, video_limit / source_rgb.height, 1.0)
+    new_w = max(1, round(source_rgb.width * scale))
+    new_h = max(1, round(source_rgb.height * scale))
+    if (new_w, new_h) != source_rgb.size:
+        source_rgb = source_rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    output_width = max(new_w, min(target_w, 900))
+    hud = Image.new('RGB', (output_width, hud_height), (16, 22, 31))
     draw = ImageDraw.Draw(hud)
+    font_px = max(17, min(23, round(output_width / 82)))
     try:
-        font = ImageFont.truetype('arial.ttf', 17)
-        small_font = ImageFont.truetype('arial.ttf', 14)
+        font = ImageFont.truetype('arial.ttf', font_px)
+        headline = ImageFont.truetype('arialbd.ttf', font_px + 2)
     except OSError:
         font = ImageFont.load_default()
-        small_font = font
-    def label(msg, y, color=(230, 230, 230), tiny=False):
-        draw.text((14, y), msg, fill=color, font=small_font if tiny else font)
-    label(f'UDP :{port} | Received: {count} | Valid CRC: {valid} | Invalid: {invalid}', 7)
+        headline = font
+    def label(msg, x, y, color=(232, 236, 240), bold=False):
+        draw.text((x, y), str(msg), fill=color, font=headline if bold else font)
+    line = font_px + 11
+    label(f'UDP :{port}  |  Frames {count}  |  CRC OK {valid}  |  Errors {invalid}',
+          15, 11, bold=True)
     if stamp is not None:
-        label(f'Frame #{stamp.sequence} | Left source UTC: {iso_utc(stamp.left_utc_ms)}', 34)
-        label(f'Apparent age LEFT: {age_ms:.1f}ms  RIGHT: {age_right_ms:.1f}ms '
-              f'(clock correction: {clock_offset_ms:+.1f}ms)', 61, (170, 245, 110))
-        label(f'R-L source capture delta: {stamp.right_minus_left_us/1000:+.1f}ms '
-              f'| Missing sequence: {skipped}', 88)
+        label(f'Frame {stamp.sequence}  |  UTC {iso_utc(stamp.left_utc_ms)}', 15, 11 + line)
+        label(f'Age L {age_ms:.1f} ms   R {age_right_ms:.1f} ms'
+              f'   |   Skew {stamp.right_minus_left_us / 1000:+.1f} ms',
+              15, 11 + line * 2, (167, 241, 135))
         if recent_ages:
-            label(f'Last {len(recent_ages)} frames: min {min(recent_ages):.0f} '
-                  f'avg {statistics.mean(recent_ages):.0f} max {max(recent_ages):.0f}ms', 116)
+            label(f'Age min {min(recent_ages):.0f}  avg {statistics.mean(recent_ages):.0f}'
+                  f'  max {max(recent_ages):.0f} ms   |   Missing {skipped}',
+                  15, 11 + line * 3)
     else:
-        label('INVALID TIMESTAMP: ' + str(last_issue), 52, (250, 80, 70))
-    if len(recent_ages) >= 2:
-        x0, y0 = 14, 155
-        gw = max(1, min(w-30, 900))
-        gh = 70
-        draw.rectangle((x0, y0, x0+gw, y0+gh), outline=(70,70,70))
-        vals = list(recent_ages)
-        low, high = min(vals), max(vals)
-        padding = max(10.0, (high-low)*0.1)
-        low -= padding
-        high += padding
-        points = [(x0+round(j*gw/max(1,len(vals)-1)),
-                   y0+gh-round((v-low)/max(1e-9,high-low)*gh))
-                  for j,v in enumerate(vals)]
-        draw.line(points, fill=(255,220,95), width=2)
-        label(f'Frame-age trend [{low:.0f} .. {high:.0f} ms]', 231, tiny=True)
-    joined = Image.new('RGB', (w, h + hud.height), (0,0,0))
-    joined.paste(frame_rgb, (0, 0))
-    joined.paste(hud, (0, h))
-    if joined.width > 1280:
-        width = 1280
-        height = max(1, round(joined.height * width / joined.width))
-        joined = joined.resize((width, height), Image.Resampling.BILINEAR)
+        label('Timestamp unavailable: ' + str(last_issue)[:65],
+              15, 11 + line, (252, 120, 108))
+    label(f'VIEW {display_mode.upper()}   |   1: Both  2: Left  3: Right'
+          f'   F: Fullscreen   S: Screenshot   Q: Exit',
+          15, hud_height - line, (188, 201, 220))
+    # Render trend graph on a wide screen without shrinking text.
+    if len(recent_ages) >= 2 and output_width >= 1100:
+        gw, gh = min(460, output_width // 3), max(70, hud_height - 62)
+        x0 = output_width - gw - 20
+        y0 = 22
+        draw.rectangle((x0, y0, x0 + gw, y0 + gh), outline=(87, 103, 122), width=2)
+        values = list(recent_ages)
+        low, high = min(values), max(values)
+        pad = max(10.0, .1 * (high - low))
+        low -= pad
+        high += pad
+        points = [(x0 + round(i * gw / max(1, len(values) - 1)),
+                   y0 + gh - round((v - low) / max(1e-9, high - low) * gh))
+                  for i, v in enumerate(values)]
+        draw.line(points, fill=(255, 219, 110), width=2)
+    joined = Image.new('RGB', (output_width, new_h + hud_height), (0, 0, 0))
+    joined.paste(source_rgb, ((output_width - new_w) // 2, 0))
+    joined.paste(hud, (0, new_h))
     return joined
 
 
