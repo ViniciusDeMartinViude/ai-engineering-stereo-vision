@@ -477,6 +477,7 @@ def main():
         print("Preview: 1 both, 2 left, 3 right, F fullscreen, S screenshot, Q/Esc quit.")
         preview_mode = args.preview_mode
         fullscreen = False
+        preview_initialized = False
         window_title = 'Stereo Vision UDP Multi-client Server'
         if not args.no_preview:
             cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
@@ -526,6 +527,9 @@ def main():
                     # Preview controls never change original encoded video / CRC footer.
                     preview = make_local_preview(frame, args.width, args.height, preview_mode)
                     cv2.imshow(window_title, preview)
+                    if not preview_initialized:
+                        cv2.resizeWindow(window_title, preview.shape[1], preview.shape[0])
+                        preview_initialized = True
                     key = cv2.waitKey(1) & 255
                     if key in (ord('1'), ord('2'), ord('3')):
                         preview_mode = {ord('1'): 'fit', ord('2'): 'left', ord('3'): 'right'}[key]
