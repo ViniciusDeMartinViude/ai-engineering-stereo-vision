@@ -241,3 +241,9 @@ At startup the client requests 7 SNTP time samples, selects the lowest network R
 Both preview windows now open **maximized** on Windows (showing the taskbar). Press `F` for borderless fullscreen when desired.
 
 **Interpretation:** The displayed video frame age is an estimate relative to the camera server's Windows clock. It can still include network asymmetry and timestamps taken after physical exposure. NTP correction cannot eliminate actual MPEG-TS/H.264 buffering, so an apparent three-second delay that persists after synchronization is a real pipeline-latency problem to investigate separately.
+
+## Binary timestamp visible again in maximized previews
+
+The server and client preview layouts include the original **100-pixel metadata footer**, including the black-and-white 168-bit timestamp/CRC16 strip. This fixes an earlier display-only crop that hid it. In `1` (both cameras) mode the entire original composite is displayed and scaled to the available window. In `2` and `3` (single-camera) mode the original shared footer (left half, where the strip is encoded) is shown underneath the selected camera. No network video pixels, encoded metadata, or decoder logic are modified.
+
+Both Windows windows continue opening **maximized**, with `F` available for fullscreen. Pull the latest changes on both PCs and restart both applications.
