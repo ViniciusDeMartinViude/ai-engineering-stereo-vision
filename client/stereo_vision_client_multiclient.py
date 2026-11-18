@@ -24,6 +24,10 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
+from lan_ntp import measure_ntp_offset
 import tkinter as tk
 from dataclasses import dataclass
 
@@ -347,7 +351,15 @@ def main():
     p.add_argument('--relay-port', type=int, default=15000,
                    help='Localhost UDP relay port, default 15000')
     p.add_argument('--clock-offset-ms', type=float, default=0.0,
-                   help='Client clock minus source clock in ms; requires independently synced clocks')
+                   help='Additional manual correction, client minus server, in milliseconds')
+    p.add_argument('--time-server', default='192.168.0.10',
+                   help='Camera server IPv4 for LAN SNTP (default 192.168.0.10)')
+    p.add_argument('--ntp-port', type=int, default=9123,
+                   help='LAN SNTP UDP port on camera server (default 9123)')
+    p.add_argument('--ntp-samples', type=int, default=7,
+                   help='Time-offset probes at startup')
+    p.add_argument('--no-time-sync', action='store_true',
+                   help='Skip automatic LAN time-offset measurement')
     p.add_argument('--no-preview', action='store_true')
     p.add_argument('--self-test', action='store_true')
     p.add_argument('--report-seconds', type=float, default=5.0)
@@ -372,6 +384,21 @@ def main():
             p.error('Invalid IPv4 multicast group')
     if args.transport == 'multicast' and not args.iface_ip:
         p.error('Multicast requires --iface-ip LOCAL_ETHERNET_IP (e.g. --iface-ip 192.168.0.11)')
+    ntp_offset_ms = 0.0
+    sync_status = 'disabled'
+    if not args.no_time_sync:
+        print(f'Checking LAN clock against {args.time_server}:{args.ntp_port}...', flush=True)
+        try:
+            ntp_offset_ms, rtt_ms, good = measure_ntp_offset(
+                args.time_server, args.ntp_port, args.ntp_samples)
+            sync_status = f'OK ({good} samples, best RTT {rtt_ms:.2f}ms)'
+            print(f'LAN clock offset: client - server = {ntp_offset_ms:+.2f} ms; '
+                  f'{sync_status}', flush=True)
+        except (OSError, ValueError, TimeoutError) as exc:
+            sync_status = f'FAILED: {exc}'
+            print(f'WARNING: LAN time alignment failed ({exc}). '
+                  'Frame ages may include clock bias.', flush=True)
+    effective_clock_offset_ms = ntp_offset_ms + args.clock_offset_ms
     client = StreamReceiver(args.port, args.transport, args.multicast_group,
                             args.multicast_iface, args.iface_ip, args.relay_port)
     count_processed = valid = invalid = skipped = 0
@@ -390,6 +417,10 @@ def main():
     if not args.no_preview:
         root = tk.Tk()
         root.title('Stereo Vision UDP Multi-client Client v7 | Q quit | S screenshot')
+        try:
+            root.state('zoomed')  # Windows maximized, not exclusive fullscreen
+        except tk.TclError:
+            root.attributes('-zoomed', True)
         panel = tk.Label(root, bg='black')
         panel.pack(fill='both', expand=True)
         def quit_app(event=None):
@@ -442,8 +473,8 @@ def main():
                 age_ms = age_right_ms = None
                 if stamp is not None:
                     valid += 1
-                    age_ms = receive_ns / 1e6 - stamp.left_utc_ms - args.clock_offset_ms
-                    age_right_ms = receive_ns / 1e6 - stamp.right_utc_ms - args.clock_offset_ms
+                    age_ms = receive_ns / 1e6 - stamp.left_utc_ms - effective_clock_offset_ms
+                    age_right_ms = receive_ns / 1e6 - stamp.right_utc_ms - effective_clock_offset_ms
                     recent_ages.append(age_ms)
                     recent_offsets.append(stamp.right_minus_left_us / 1000)
                     if last_valid_seq is not None:
@@ -458,7 +489,7 @@ def main():
                     last_preview = make_preview(frame, stamp, args.port, count, valid, invalid,
                                                 skipped, age_ms, age_right_ms,
                                                 recent_ages, recent_offsets, last_issue,
-                                                args.clock_offset_ms,
+                                                effective_clock_offset_ms,
                                                 screen_size=(root.winfo_screenwidth(), root.winfo_screenheight()),
                                                 display_mode=display_mode)
                     photo = ImageTk.PhotoImage(last_preview, master=root)
@@ -474,7 +505,8 @@ def main():
                              f'L/R offset={recent_offsets[-1]:+.1f}ms')
                 else:
                     text += f'waiting for valid timestamps; last error={last_issue}'
-                print(text + relay_note, flush=True)
+                print(text + relay_note + f' clock={sync_status} '
+                      f'offset={effective_clock_offset_ms:+.1f}ms', flush=True)
                 last_report = time.monotonic()
             time.sleep(.01)
     except KeyboardInterrupt:
