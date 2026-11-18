@@ -24,7 +24,7 @@ The earlier single-client UDP system showed very high timestamp decode reliabili
    ```powershell
    conda activate gst-stereo
    python client/stereo_vision_client_multiclient.py --self-test
-   python client/stereo_vision_client_multiclient.py --port 5000
+   python client/stereo_vision_client_multiclient.py --port 5000 --iface-ip RECEIVER_ETHERNET_IP
    ```
 
 The default shared multicast group is `239.10.10.10:5000`. Students join it automatically. The student PCs must allow inbound UDP port 5000 on the trusted LAN. Only one process can bind the receiving port on each machine. Stop VLC or an older receiver before starting the Python client.
@@ -56,3 +56,7 @@ python client/stereo_vision_client_multiclient.py --transport unicast --port 500
 ```
 
 Multicast does **not** use `clients.txt`. Avoid enabling IPTV/VLAN settings merely to turn on multicasting; IGMP snooping on the actual Ethernet switch is the relevant feature. An IGMP querier may be needed in a snooping-enabled VLAN.
+
+### Windows multicast interface selection
+
+The receiving client now defaults to a **Python socket multicast join**, explicitly tied to the local Ethernet IPv4 address. This matches the working raw multicast probe, then forwards each unchanged MPEG-TS datagram over loopback to the original GStreamer H.264 decoder. Specify `--iface-ip` with each receiver's **own** Ethernet IP (e.g. `192.168.0.11`). Use `--transport unicast` to skip the relay entirely.
