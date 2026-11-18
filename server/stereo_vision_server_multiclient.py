@@ -428,11 +428,18 @@ def make_local_preview(frame, width, height, mode='fit', screen=None):
     """Only modifies the server DISPLAY, never the outgoing UDP frame."""
     sw, sh = screen if screen else desktop_dimensions()
     area_w, area_h = max(400, sw - 50), max(300, sh - 120)
-    video = frame[:height, :, :]
+    # Keep the 100px telemetry footer (including the 168-bit CRC strip)
+    # visible in ALL preview modes. The original frame is never modified.
     if mode == 'left':
-        video = video[:, :width, :]
+        video = np.concatenate((frame[:height, :width, :],
+                                frame[height:, :width, :]), axis=0)
     elif mode == 'right':
-        video = video[:, width:, :]
+        # The binary strip occupies the LEFT side of the shared footer.
+        # Reuse that footer beneath the right camera rather than cropping it.
+        video = np.concatenate((frame[:height, width:, :],
+                                frame[height:, :width, :]), axis=0)
+    else:
+        video = frame
     factor = min(area_w / video.shape[1], (area_h - 76) / video.shape[0], 1.0)
     size = (max(1, round(video.shape[1] * factor)),
             max(1, round(video.shape[0] * factor)))
