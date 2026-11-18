@@ -125,7 +125,7 @@ def self_test():
 
 
 class StreamReceiver:
-    def __init__(self, port):
+    def __init__(self, port, transport='multicast', group='239.10.10.10', multicast_iface=None):
         try:
             import gi
             gi.require_version('Gst', '1.0')
@@ -145,8 +145,15 @@ class StreamReceiver:
         self.last_caps = "(none)"
         # Preserve the entire compressed H.264 stream until decoding.
         # Dropping TS/H.264 packets BEFORE decode can break reference-frame recovery.
+        if transport == 'multicast':
+            source = (f'udpsrc port={port} multicast-group={group} '
+                      'auto-multicast=true buffer-size=4194304 ')
+            if multicast_iface:
+                source += f'multicast-iface="{multicast_iface}" '
+        else:
+            source = f'udpsrc address=0.0.0.0 port={port} buffer-size=4194304 '
         pipeline_str = (
-            f'udpsrc address=0.0.0.0 port={port} buffer-size=4194304 '
+            source
             'caps="video/mpegts,systemstream=(boolean)true,packetsize=(int)188" '
             '! tsparse set-timestamps=true '
             '! tsdemux name=demux '
@@ -251,6 +258,10 @@ class StreamReceiver:
 def main():
     p = argparse.ArgumentParser(description='Stereo Vision UDP Multi-client Client v7 / Tkinter display')
     p.add_argument('--port', type=int, default=5000)
+    p.add_argument('--transport', choices=['multicast','unicast'], default='multicast')
+    p.add_argument('--multicast-group', default='239.10.10.10')
+    p.add_argument('--multicast-iface', default=None,
+                   help='Optional GStreamer local network interface name')
     p.add_argument('--clock-offset-ms', type=float, default=0.0,
                    help='Client clock minus source clock in ms; requires independently synced clocks')
     p.add_argument('--no-preview', action='store_true')
@@ -268,7 +279,15 @@ def main():
         print('PASS: Pillow dashboard and preview composition.')
         return
 
-    client = StreamReceiver(args.port)
+    if args.transport == 'multicast':
+        import ipaddress
+        try:
+            if not ipaddress.IPv4Address(args.multicast_group).is_multicast:
+                p.error('Invalid IPv4 multicast group')
+        except ValueError:
+            p.error('Invalid IPv4 multicast group')
+    client = StreamReceiver(args.port, args.transport, args.multicast_group,
+                            args.multicast_iface)
     count_processed = valid = invalid = skipped = 0
     last_valid_seq = None
     last_issue = ''
@@ -322,7 +341,9 @@ def main():
         panel.configure(image=photo)
         panel.image = photo
     client.start()
-    print(f'Listening for Stereo Vision Server v1 on UDP {args.port}; press Q/Esc to exit, S for screenshot.', flush=True)
+    print(f'Listening on {args.transport.upper()} '
+          f'{args.multicast_group if args.transport == "multicast" else "0.0.0.0"}:{args.port}; '
+          'press Q/Esc to exit, S for screenshot.', flush=True)
     try:
         while not closing:
             if root is not None:
