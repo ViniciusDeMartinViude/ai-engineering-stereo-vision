@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from yolo_detector import YoloWorker
 
 MAGIC = 0xA55A
 VERSION = 1
@@ -363,9 +364,21 @@ def main():
     p.add_argument('--no-preview', action='store_true')
     p.add_argument('--self-test', action='store_true')
     p.add_argument('--report-seconds', type=float, default=5.0)
+    p.add_argument('--yolo-model', default=None,
+                   help='Optional local Ultralytics YOLO .pt model; enables detection on both cameras')
+    p.add_argument('--yolo-conf', type=float, default=0.35,
+                   help='YOLO detection confidence threshold (default 0.35)')
+    p.add_argument('--yolo-imgsz', type=int, default=640,
+                   help='YOLO inference image size (default 640)')
+    p.add_argument('--yolo-device', default='auto',
+                   help='YOLO device: auto, cpu, 0, etc.')
     p.add_argument('--display-mode', choices=['both','left','right'], default='both',
                    help='Initial viewer layout (only affects local display)')
     args = p.parse_args()
+    if not 0 < args.yolo_conf <= 1:
+        p.error('--yolo-conf must be between 0 and 1')
+    if args.yolo_imgsz < 32 or args.yolo_imgsz % 32:
+        p.error('--yolo-imgsz must be a positive multiple of 32 (e.g. 640)')
     if args.self_test:
         self_test()
         # Exercise dashboard and preview composition with a synthetic frame.
@@ -401,6 +414,8 @@ def main():
     effective_clock_offset_ms = ntp_offset_ms + args.clock_offset_ms
     client = StreamReceiver(args.port, args.transport, args.multicast_group,
                             args.multicast_iface, args.iface_ip, args.relay_port)
+    yolo = (YoloWorker(args.yolo_model, args.yolo_conf, args.yolo_imgsz,
+                       args.yolo_device) if args.yolo_model else None)
     count_processed = valid = invalid = skipped = 0
     last_valid_seq = None
     last_issue = ''
@@ -458,6 +473,10 @@ def main():
         panel.configure(image=photo)
         panel.image = photo
     client.start()
+    if yolo:
+        yolo.start()
+        print(f'YOLO started: model={args.yolo_model} confidence={args.yolo_conf} '
+              f'imgsz={args.yolo_imgsz} device={args.yolo_device}', flush=True)
     print(f'Listening on {args.transport.upper()} '
           f'{args.multicast_group if args.transport == "multicast" else "0.0.0.0"}:{args.port}; '
           'press Q/Esc to exit, S for screenshot.', flush=True)
@@ -469,6 +488,8 @@ def main():
             frame, receive_ns, count = client.latest()
             if frame is not None and frame.ndim == 3 and frame.shape[0] > 0 and frame.shape[1] > 0 and count != count_processed:
                 count_processed = count
+                if yolo:
+                    yolo.submit(frame, count)
                 stamp, error = decode_strip(frame)
                 age_ms = age_right_ms = None
                 if stamp is not None:
@@ -491,7 +512,9 @@ def main():
                                                 recent_ages, recent_offsets, last_issue,
                                                 effective_clock_offset_ms,
                                                 screen_size=(root.winfo_screenwidth(), root.winfo_screenheight()),
-                                                display_mode=display_mode)
+                                                display_mode=display_mode,
+                                                yolo_result=yolo.snapshot() if yolo else None,
+                                                frame_id=count)
                     photo = ImageTk.PhotoImage(last_preview, master=root)
                     panel.configure(image=photo)
                     panel.image = photo
@@ -505,13 +528,16 @@ def main():
                              f'L/R offset={recent_offsets[-1]:+.1f}ms')
                 else:
                     text += f'waiting for valid timestamps; last error={last_issue}'
-                print(text + relay_note + f' clock={sync_status} '
+                yolo_note = (' YOLO=' + yolo.snapshot()[1]) if yolo else ''
+                print(text + relay_note + yolo_note + f' clock={sync_status} '
                       f'offset={effective_clock_offset_ms:+.1f}ms', flush=True)
                 last_report = time.monotonic()
             time.sleep(.01)
     except KeyboardInterrupt:
         print('Interrupted', flush=True)
     finally:
+        if yolo:
+            yolo.stop()
         client.stop()
         if root is not None:
             root.destroy()
@@ -519,7 +545,8 @@ def main():
 
 def make_preview(frame, stamp, port, count, valid, invalid, skipped,
                  age_ms, age_right_ms, recent_ages, recent_offsets, last_issue,
-                 clock_offset_ms, screen_size=None, display_mode='both'):
+                 clock_offset_ms, screen_size=None, display_mode='both',
+                 yolo_result=None, frame_id=None):
     """Maximized display with legible timestamps, barcode and graphed latency.
 
     The original decoded frame and its 168-bit CRC are NEVER modified.
@@ -551,6 +578,36 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
     new_h = max(1, round(source_rgb.height * scale))
     if (new_w, new_h) != source_rgb.size:
         source_rgb = source_rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    # Object boxes use source-camera coordinates. Display only, never alter
+    # original decoded pixels or the CRC timestamp.
+    if yolo_result is not None:
+        detections, status, result_id, result_time, inference_ms, yolo_error = yolo_result
+        # Stale predictions on moving conveyors are misleading; only display
+        # results for recent frames, at most 1 second old at inference finish.
+        if result_time and time.monotonic() - result_time < 1.0:
+            draw_boxes = ImageDraw.Draw(source_rgb)
+            try:
+                box_font = ImageFont.truetype('arialbd.ttf', 22)
+            except OSError:
+                box_font = ImageFont.load_default()
+            sx, sy = new_w / video.shape[1], new_h / video.shape[0]
+            for det in detections:
+                if display_mode == 'left' and det.side != 'LEFT':
+                    continue
+                if display_mode == 'right' and det.side != 'RIGHT':
+                    continue
+                offset_x = half if display_mode == 'both' and det.side == 'RIGHT' else 0
+                x1, y1, x2, y2 = det.xyxy
+                x1, x2 = (x1 + offset_x) * sx, (x2 + offset_x) * sx
+                y1, y2 = y1 * sy, y2 * sy
+                color = (75, 225, 255) if det.side == 'LEFT' else (255, 180, 85)
+                draw_boxes.rectangle((x1, y1, x2, y2), outline=color, width=3)
+                title = f'{det.label} {det.confidence:.0%}'
+                bbox = draw_boxes.textbbox((0, 0), title, font=box_font)
+                label_w, label_h = bbox[2] - bbox[0] + 10, bbox[3] - bbox[1] + 7
+                ly = max(0, y1 - label_h)
+                draw_boxes.rectangle((x1, ly, x1 + label_w, ly + label_h), fill=color)
+                draw_boxes.text((x1 + 5, ly + 3), title, font=box_font, fill=(15, 20, 25))
     output_width = max(new_w, min(target_w, 1040))
     hud = Image.new('RGB', (output_width, hud_height), (16, 22, 31))
     draw = ImageDraw.Draw(hud)
@@ -619,9 +676,15 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
         label('Waiting for valid frame-age samples', graph_x+15, graph_y+24,
               (188, 201, 220), selected_font=chart_font)
 
+    if yolo_result is not None:
+        _, yolo_status, yolo_fid, yolo_time, yolo_ms, yolo_error = yolo_result
+        yolo_text = yolo_status[:95]
+        label(yolo_text, 15, 305,
+              (251, 144, 128) if yolo_error else (125, 221, 244),
+              selected_font=chart_font)
     label(f'VIEW {display_mode.upper()}   |   1: Both  2: Left  3: Right'
           '   F: Fullscreen   S: Screenshot   Q: Exit',
-          15, 319, (188, 201, 220), selected_font=chart_font)
+          15, 327, (188, 201, 220), selected_font=chart_font)
     joined = Image.new('RGB', (output_width, new_h + hud_height), (0, 0, 0))
     joined.paste(source_rgb, ((output_width-new_w)//2, 0))
     joined.paste(hud, (0, new_h))
