@@ -520,9 +520,10 @@ def main():
 def make_preview(frame, stamp, port, count, valid, invalid, skipped,
                  age_ms, age_right_ms, recent_ages, recent_offsets, last_issue,
                  clock_offset_ms, screen_size=None, display_mode='both'):
-    """Responsive preview. Scale VIDEO only; render HUD text at display resolution.
+    """Maximized display with legible timestamps, barcode and graphed latency.
 
-    Does not affect the incoming video, timestamp decoder or screenshot source.
+    The original decoded frame and its 168-bit CRC are NEVER modified.
+    The footer is shown separately at the display's pixel scale.
     """
     h, w = frame.shape[:2]
     if h < 1 or w < 1:
@@ -530,77 +531,99 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
     if screen_size is None:
         screen_size = (1920, 1080)
     sw, sh = screen_size
-    target_w = min(w, max(500, sw - 65))
-    target_h = max(260, sh - 120)
-    # Keep the actual black/white 168-bit footer on screen, including
-    # when viewing just one camera. Decode still uses the raw original frame.
-    video_h = max(1, h - 100)
+    target_w = max(500, sw - 65)
+    target_h = max(400, sh - 115)
+    source_h = max(1, h - 100)
     half = w // 2
     if display_mode == 'left':
-        video = np.concatenate((frame[:video_h, :half, :],
-                                frame[video_h:, :half, :]), axis=0)
+        video = frame[:source_h, :half, :]
     elif display_mode == 'right':
-        # The timestamp strip is at the left edge of the shared footer.
-        # Show it beneath the right camera too.
-        video = np.concatenate((frame[:video_h, half:, :],
-                                frame[video_h:, :half, :]), axis=0)
+        video = frame[:source_h, half:, :]
     else:
-        video = frame
+        video = frame[:source_h, :, :]
     source_rgb = Image.fromarray(np.ascontiguousarray(video[:, :, ::-1]), mode='RGB')
-    hud_height = min(285, max(215, round(target_h * .26)))
-    video_limit = max(160, target_h - hud_height)
+
+    # Graph and metadata are rendered AFTER scaling, so they are never tiny.
+    hud_height = 350
+    video_limit = max(120, target_h - hud_height)
     scale = min(target_w / source_rgb.width, video_limit / source_rgb.height, 1.0)
     new_w = max(1, round(source_rgb.width * scale))
     new_h = max(1, round(source_rgb.height * scale))
     if (new_w, new_h) != source_rgb.size:
         source_rgb = source_rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    output_width = max(new_w, min(target_w, 900))
+    output_width = max(new_w, min(target_w, 1040))
     hud = Image.new('RGB', (output_width, hud_height), (16, 22, 31))
     draw = ImageDraw.Draw(hud)
-    font_px = max(17, min(23, round(output_width / 82)))
+    font_px = max(17, min(23, round(output_width / 85)))
     try:
         font = ImageFont.truetype('arial.ttf', font_px)
         headline = ImageFont.truetype('arialbd.ttf', font_px + 2)
+        chart_font = ImageFont.truetype('arial.ttf', max(16, font_px - 2))
     except OSError:
         font = ImageFont.load_default()
         headline = font
-    def label(msg, x, y, color=(232, 236, 240), bold=False):
-        draw.text((x, y), str(msg), fill=color, font=headline if bold else font)
-    line = font_px + 11
+        chart_font = font
+
+    def label(msg, x, y, color=(232, 236, 240), bold=False, selected_font=None):
+        draw.text((x, y), str(msg), fill=color,
+                  font=selected_font or (headline if bold else font))
+
     label(f'UDP :{port}  |  Frames {count}  |  CRC OK {valid}  |  Errors {invalid}',
-          15, 11, bold=True)
+          15, 8, bold=True)
     if stamp is not None:
-        label(f'Frame {stamp.sequence}  |  UTC {iso_utc(stamp.left_utc_ms)}', 15, 11 + line)
+        label(f'LEFT UTC  {iso_utc(stamp.left_utc_ms)}  |  Frame {stamp.sequence}',
+              15, 38, (240, 240, 240))
+        label(f'RIGHT UTC {iso_utc(stamp.right_utc_ms)}',
+              15, 67, (240, 240, 240))
         label(f'Age L {age_ms:.1f} ms   R {age_right_ms:.1f} ms'
               f'   |   Skew {stamp.right_minus_left_us / 1000:+.1f} ms',
-              15, 11 + line * 2, (167, 241, 135))
-        if recent_ages:
-            label(f'Age min {min(recent_ages):.0f}  avg {statistics.mean(recent_ages):.0f}'
-                  f'  max {max(recent_ages):.0f} ms   |   Missing {skipped}',
-                  15, 11 + line * 3)
+              15, 96, (167, 241, 135))
     else:
-        label('Timestamp unavailable: ' + str(last_issue)[:65],
-              15, 11 + line, (252, 120, 108))
-    label(f'VIEW {display_mode.upper()}   |   1: Both  2: Left  3: Right'
-          f'   F: Fullscreen   S: Screenshot   Q: Exit',
-          15, hud_height - line, (188, 201, 220))
-    # Render trend graph on a wide screen without shrinking text.
-    if len(recent_ages) >= 2 and output_width >= 1100:
-        gw, gh = min(460, output_width // 3), max(70, hud_height - 62)
-        x0 = output_width - gw - 20
-        y0 = 22
-        draw.rectangle((x0, y0, x0 + gw, y0 + gh), outline=(87, 103, 122), width=2)
+        label('Timestamp unavailable: ' + str(last_issue)[:65], 15, 49, (252, 120, 108))
+
+    # Original bar pixels sampled BEFORE any resizing, then enlarged with
+    # NEAREST to preserve the crisp black-and-white bit pattern on screen.
+    label('BINARY TIMESTAMP + CRC16  |  168 bits', 15, 124,
+          (176, 221, 248), selected_font=chart_font)
+    x0, bit_w, bit_h = X0, BIT_COUNT * CELL_W, CELL_H
+    y0 = h - Y_BOTTOM_OFFSET
+    roi = frame[y0:y0+bit_h, x0:x0+bit_w, :]
+    if roi.shape == (bit_h, bit_w, 3):
+        bars = Image.fromarray(np.ascontiguousarray(roi[:, :, ::-1]), mode='RGB')
+        bars = bars.resize((output_width-30, 34), Image.Resampling.NEAREST)
+        hud.paste(bars, (15, 153))
+
+    # Dedicated graph area with explicit legend and axes; no overlapping HUD.
+    graph_x, graph_y = 88, 218
+    graph_w = max(100, output_width - 115)
+    graph_h = 79
+    draw.rectangle((graph_x, graph_y, graph_x+graph_w, graph_y+graph_h),
+                   outline=(90, 109, 131), width=2)
+    label('Latency trend', 15, 190, bold=True, selected_font=chart_font)
+    draw.line([(200, 201), (235, 201)], fill=(255, 219, 110), width=4)
+    label('Frame age (ms)  |  newer frames ->',
+          245, 188, (214, 221, 233), selected_font=chart_font)
+    if len(recent_ages) >= 2:
         values = list(recent_ages)
         low, high = min(values), max(values)
-        pad = max(10.0, .1 * (high - low))
-        low -= pad
-        high += pad
-        points = [(x0 + round(i * gw / max(1, len(values) - 1)),
-                   y0 + gh - round((v - low) / max(1e-9, high - low) * gh))
+        margin = max(10., (high - low) * .1)
+        low -= margin
+        high += margin
+        points = [(graph_x + round(i * graph_w / max(1, len(values) - 1)),
+                   graph_y + graph_h - round((v-low) / max(1e-9, high-low)*graph_h))
                   for i, v in enumerate(values)]
-        draw.line(points, fill=(255, 219, 110), width=2)
+        draw.line(points, fill=(255, 219, 110), width=3)
+        label(f'{high:.0f}', 15, graph_y-7, selected_font=chart_font)
+        label(f'{low:.0f}', 15, graph_y+graph_h-19, selected_font=chart_font)
+    else:
+        label('Waiting for valid frame-age samples', graph_x+15, graph_y+24,
+              (188, 201, 220), selected_font=chart_font)
+
+    label(f'VIEW {display_mode.upper()}   |   1: Both  2: Left  3: Right'
+          '   F: Fullscreen   S: Screenshot   Q: Exit',
+          15, 319, (188, 201, 220), selected_font=chart_font)
     joined = Image.new('RGB', (output_width, new_h + hud_height), (0, 0, 0))
-    joined.paste(source_rgb, ((output_width - new_w) // 2, 0))
+    joined.paste(source_rgb, ((output_width-new_w)//2, 0))
     joined.paste(hud, (0, new_h))
     return joined
 
