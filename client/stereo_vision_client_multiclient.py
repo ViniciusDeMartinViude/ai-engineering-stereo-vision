@@ -17,6 +17,7 @@ import argparse
 import collections
 import datetime as dt
 import math
+import socket
 import statistics
 import struct
 import sys
@@ -124,8 +125,80 @@ def self_test():
     print('PASS: lossy-compression test (JPEG quality 75).')
 
 
+
+class MulticastSocketRelay:
+    """Join multicast using the same Python socket API as multicast_video_probe.
+
+    Forward the original MPEG-TS UDP datagrams to a private loopback UDP port.
+    GStreamer then sees a normal unicast udpsrc and no longer needs to select
+    a Windows multicast adapter. No decode/re-encode or packet transformation.
+    """
+    def __init__(self, group, port, iface_ip, local_port=15000):
+        if not iface_ip:
+            raise ValueError('Multicast receiver requires --iface-ip (this PC Ethernet IPv4)')
+        self.group = group
+        self.port = port
+        self.iface_ip = iface_ip
+        self.local_port = local_port
+        self.done = threading.Event()
+        self.thread = None
+        self.sock = None
+        self.error = None
+        self.packets = 0
+        self.bytes = 0
+        self.last_received = 0.0
+
+    def start(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            sock.bind(('', self.port))
+            membership = socket.inet_aton(self.group) + socket.inet_aton(self.iface_ip)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+            sock.settimeout(0.5)
+        except Exception:
+            sock.close()
+            raise
+        self.sock = sock
+        self.thread = threading.Thread(target=self._run, name='multicast-socket-relay', daemon=True)
+        self.thread.start()
+        print(f'Multicast socket joined {self.group}:{self.port} via {self.iface_ip}; '
+              f'forwarding MPEG-TS unchanged to 127.0.0.1:{self.local_port}', flush=True)
+
+    def _run(self):
+        output = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            while not self.done.is_set():
+                try:
+                    packet, addr = self.sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if self.done.is_set():
+                        break
+                    raise
+                if not packet:
+                    continue
+                output.sendto(packet, ('127.0.0.1', self.local_port))
+                self.packets += 1
+                self.bytes += len(packet)
+                self.last_received = time.monotonic()
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            output.close()
+
+    def stop(self):
+        self.done.set()
+        if self.sock:
+            self.sock.close()
+        if self.thread:
+            self.thread.join(timeout=1.5)
+
 class StreamReceiver:
-    def __init__(self, port, transport='multicast', group='239.10.10.10', multicast_iface=None):
+    def __init__(self, port, transport='multicast', group='239.10.10.10', multicast_iface=None,
+                 iface_ip=None, local_port=15000):
         try:
             import gi
             gi.require_version('Gst', '1.0')
@@ -143,13 +216,14 @@ class StreamReceiver:
         self.warning_count = 0
         self.bad_frames = 0
         self.last_caps = "(none)"
+        self.relay = (MulticastSocketRelay(group, port, iface_ip, local_port)
+                      if transport == 'multicast' else None)
         # Preserve the entire compressed H.264 stream until decoding.
         # Dropping TS/H.264 packets BEFORE decode can break reference-frame recovery.
         if transport == 'multicast':
-            source = (f'udpsrc port={port} multicast-group={group} '
-                      'auto-multicast=true buffer-size=4194304 ')
-            if multicast_iface:
-                source += f'multicast-iface="{multicast_iface}" '
+            # Consume the reliable Python-socket multicast join from a local
+            # unicast relay, instead of letting GStreamer choose the NIC.
+            source = f'udpsrc address=127.0.0.1 port={local_port} buffer-size=4194304 '
         else:
             source = f'udpsrc address=0.0.0.0 port={port} buffer-size=4194304 '
         pipeline_str = (
@@ -228,6 +302,8 @@ class StreamReceiver:
             return self.latest_frame, self.latest_receive_ns, self.received
 
     def check_error(self):
+        if self.relay and self.relay.error:
+            raise RuntimeError('Multicast socket relay: ' + self.relay.error)
         Gst = self.Gst
         bus = self.pipeline.get_bus()
         while True:
@@ -250,8 +326,12 @@ class StreamReceiver:
     def start(self):
         if self.pipeline.set_state(self.Gst.State.PLAYING) == self.Gst.StateChangeReturn.FAILURE:
             raise RuntimeError('Could not start UDP receiver pipeline')
+        if self.relay:
+            self.relay.start()
 
     def stop(self):
+        if self.relay:
+            self.relay.stop()
         self.pipeline.set_state(self.Gst.State.NULL)
 
 
@@ -261,7 +341,11 @@ def main():
     p.add_argument('--transport', choices=['multicast','unicast'], default='multicast')
     p.add_argument('--multicast-group', default='239.10.10.10')
     p.add_argument('--multicast-iface', default=None,
-                   help='Optional GStreamer local network interface name')
+                   help='Legacy GStreamer interface option (Python multicast uses --iface-ip)')
+    p.add_argument('--iface-ip', default=None,
+                   help='Local Ethernet IPv4 used to join multicast (e.g. 192.168.0.11)')
+    p.add_argument('--relay-port', type=int, default=15000,
+                   help='Localhost UDP relay port, default 15000')
     p.add_argument('--clock-offset-ms', type=float, default=0.0,
                    help='Client clock minus source clock in ms; requires independently synced clocks')
     p.add_argument('--no-preview', action='store_true')
@@ -286,8 +370,10 @@ def main():
                 p.error('Invalid IPv4 multicast group')
         except ValueError:
             p.error('Invalid IPv4 multicast group')
+    if args.transport == 'multicast' and not args.iface_ip:
+        p.error('Multicast requires --iface-ip LOCAL_ETHERNET_IP (e.g. --iface-ip 192.168.0.11)')
     client = StreamReceiver(args.port, args.transport, args.multicast_group,
-                            args.multicast_iface)
+                            args.multicast_iface, args.iface_ip, args.relay_port)
     count_processed = valid = invalid = skipped = 0
     last_valid_seq = None
     last_issue = ''
@@ -379,6 +465,8 @@ def main():
                     panel.configure(image=photo)
                     panel.image = photo
             if time.monotonic() - last_report >= args.report_seconds:
+                relay_note = (f' multicast_udp={client.relay.packets} '
+                              if client.relay else '')
                 text = (f'[{time.monotonic()-started:.0f}s] decoded={count} valid={valid} '
                         f'invalid={invalid} missing_seq={skipped} warnings={client.warning_count} bad_frames={client.bad_frames} ')
                 if recent_ages:
@@ -386,7 +474,7 @@ def main():
                              f'L/R offset={recent_offsets[-1]:+.1f}ms')
                 else:
                     text += f'waiting for valid timestamps; last error={last_issue}'
-                print(text, flush=True)
+                print(text + relay_note, flush=True)
                 last_report = time.monotonic()
             time.sleep(.01)
     except KeyboardInterrupt:
