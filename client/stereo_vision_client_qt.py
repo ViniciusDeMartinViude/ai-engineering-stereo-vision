@@ -46,6 +46,7 @@ class DrawViewBox(pg.ViewBox):
         self.start = None
         self.preview = QtWidgets.QGraphicsRectItem()
         self.preview.setPen(pg.mkPen('#ffcb6b', width=3))
+        self.preview.setZValue(100)  # ensure selection outline remains above camera pixels
         self.preview.setBrush(pg.mkBrush(255, 200, 80, 25))
         self.addItem(self.preview, ignoreBounds=True)
         self.preview.hide()
@@ -348,7 +349,7 @@ class Studio(QtWidgets.QMainWindow):
                 offset, rtt, samples = measure_ntp_offset(
                     self.args.time_server, self.args.ntp_port, self.args.ntp_samples)
                 self.clock_offset += offset
-                self.clock_status = f'Clock +{offset:+.1f} ms; RTT {rtt:.1f} ms ({samples} samples)'
+                self.clock_status = f'Clock offset {offset:+.1f} ms; RTT {rtt:.1f} ms ({samples} samples)'
             except (OSError, TimeoutError, ValueError) as exc:
                 self.clock_status = f'Clock sync unavailable: {exc}'
         else:
