@@ -258,3 +258,32 @@ Pull on both machines and restart each program:
 ```powershell
 git pull origin main
 ```
+
+## YOLO object detection on the student client
+
+The client can run **local Ultralytics YOLO object detection** on both stereo images, independently. This is optional: without \`--yolo-model\`, the existing multicast viewer works unchanged. It draws bounding boxes, class names and confidence percentages over the displayed images, along with an inference status/count. The model sees only the camera image regions (not the 100-pixel binary timestamp footer). Original H.264 packets and CRC16 timestamp are unchanged.
+
+Install YOLO into your existing \`gst-stereo\` Conda environment **on each student/receiver PC that will run inference**:
+
+\`\`\`powershell
+conda activate gst-stereo
+python -m pip install ultralytics
+\`\`\`
+
+Start the receiver (example Ethernet IP from the working test):
+
+\`\`\`powershell
+python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11 --time-server 192.168.0.10 --yolo-model yolo26n.pt --yolo-conf 0.35 --yolo-imgsz 640 --yolo-device auto
+\`\`\`
+
+Or use a **locally trained model**:
+
+\`\`\`powershell
+python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11 --yolo-model "C:\models\best.pt" --yolo-conf 0.5 --yolo-imgsz 640 --yolo-device 0
+\`\`\`
+
+The pretrained model file may be downloaded by Ultralytics if not present; a custom \`best.pt\` path must exist locally. For GPU inference, make sure PyTorch has a working CUDA installation; \`--yolo-device 0\` explicitly selects GPU 0 (an invalid device produces a reported error). \`--yolo-device cpu\` forces CPU.
+
+**Architecture:** Each decoded stereo frame is split into LEFT and RIGHT camera images; a separate worker batches the two views for YOLO. Its pending input buffer has only one slot, so a slow model processes the newest available frame instead of accumulating seconds of extra latency. YOLO inference does not block the multicast decoder, NTP synchronization or the Tkinter video UI. Bounding boxes are mapped from each camera's original pixel coordinates into the selected display mode (both / left / right). Results older than one second since inference completed are hidden.
+
+This adds object detection only, **not** stereo matching, depth calculation or 3D object coordinates. To estimate height/depth, the cameras still require calibrated intrinsics, extrinsics and temporal pairing.
