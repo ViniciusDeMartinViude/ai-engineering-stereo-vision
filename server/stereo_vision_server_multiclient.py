@@ -16,6 +16,10 @@ Dependencies: pygobject, GStreamer, opencv-python, numpy.
 import argparse
 import ipaddress
 from pathlib import Path
+
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
+from lan_ntp import LanNtpServer
 import datetime as dt
 import os
 import struct
@@ -463,6 +467,12 @@ def main():
     parser.add_argument("--clients-file", help="Text file: one IP or IP:port per line; reloaded every 2 seconds")
     parser.add_argument("--port", type=int, default=5000, help="Default destination UDP port")
     parser.add_argument("--bitrate", type=int, default=3000, help="NVENC bitrate in kbps (default: known-good 3000)")
+    parser.add_argument("--ntp-host", default="0.0.0.0",
+                        help="Bind address for LAN SNTP clock service")
+    parser.add_argument("--ntp-port", type=int, default=9123,
+                        help="LAN SNTP port (default 9123; 123 can conflict with Windows Time)")
+    parser.add_argument("--no-ntp", action="store_true",
+                        help="Disable LAN SNTP clock service")
     parser.add_argument("--no-preview", action="store_true")
     parser.add_argument("--preview-mode", choices=['fit','left','right'], default='fit',
                         help='Local preview layout; changes only the server display')
@@ -504,8 +514,17 @@ def main():
                              multicast=args.transport == 'multicast',
                              multicast_iface=args.multicast_iface)
     next_reload = time.monotonic() + 2.0
+    ntp_service = None
     print("Starting cameras...", flush=True)
     try:
+        if not args.no_ntp:
+            ntp_service = LanNtpServer(args.ntp_host, args.ntp_port)
+            try:
+                ntp_service.start()
+            except OSError as exc:
+                print(f"WARNING: LAN SNTP service unavailable: {exc}. "
+                      f"Try --ntp-port 9123 or check Windows Firewall.", flush=True)
+                ntp_service = None
         negotiate_stereo_pair(left, right)
         publisher.start()
         print('UDP '+args.transport.upper()+' MPEG-TS NVENC destination:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
@@ -517,6 +536,17 @@ def main():
         window_title = 'Stereo Vision UDP Multi-client Server'
         if not args.no_preview:
             cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+            # Windows maximized window retains visible taskbar and border.
+            cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+            try:
+                cv2.setWindowProperty(window_title, cv2.WND_PROP_AUTOSIZE, 0)
+                cv2.resizeWindow(window_title, *desktop_dimensions())
+                import ctypes
+                hwnd = ctypes.windll.user32.FindWindowW(None, window_title)
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+            except (OSError, AttributeError):
+                pass
         frame_number = 0
         period_ns = int(1e9 / args.fps)
         target_ns = time.monotonic_ns()
@@ -565,7 +595,6 @@ def main():
                     preview = make_local_preview(frame, args.width, args.height, preview_mode)
                     cv2.imshow(window_title, preview)
                     if not preview_initialized:
-                        cv2.resizeWindow(window_title, preview.shape[1], preview.shape[0])
                         preview_initialized = True
                     key = cv2.waitKey(1) & 255
                     if key in (ord('1'), ord('2'), ord('3')):
@@ -614,6 +643,8 @@ def main():
     except KeyboardInterrupt:
         print("Interrupted")
     finally:
+        if ntp_service is not None:
+            ntp_service.stop()
         publisher.stop()
         left.stop()
         right.stop()
