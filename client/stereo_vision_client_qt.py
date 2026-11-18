@@ -6,7 +6,7 @@ timestamp decoder, and optional YOLO worker as the Tkinter client.
 
 Install: python -m pip install PySide6 pyqtgraph
 Run: python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11
-Optional YOLO: --yolo-model C:\models\best.pt --yolo-device 0
+Optional YOLO: --yolo-model C:/models/best.pt --yolo-device 0
 """
 from __future__ import annotations
 
