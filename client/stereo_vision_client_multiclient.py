@@ -386,7 +386,14 @@ def main():
         sample = np.zeros((580, 1280, 3), dtype=np.uint8)
         preview = make_preview(sample, None, args.port, 0, 0, 0, 0, None, None, [], [], '', args.clock_offset_ms)
         assert preview.size[0] > 0 and preview.size[1] > 0
-        print('PASS: Pillow dashboard and preview composition.')
+        for side in ('left', 'right'):
+            geom, _, _ = preview_layout((1180, 3840, 3), (1920, 1080), side)
+            a = geom.point(geom.left + geom.width // 4,
+                           geom.top + geom.height // 4)
+            b = geom.point(geom.left + 3 * geom.width // 4,
+                           geom.top + 3 * geom.height // 4)
+            assert normalized_roi(a, b, 1920, 1080), side
+        print('PASS: Pillow dashboard, per-camera ROI geometry and preview composition.')
         return
 
     if args.transport == 'multicast':
