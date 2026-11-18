@@ -247,3 +247,14 @@ Both preview windows now open **maximized** on Windows (showing the taskbar). Pr
 The server and client preview layouts include the original **100-pixel metadata footer**, including the black-and-white 168-bit timestamp/CRC16 strip. This fixes an earlier display-only crop that hid it. In `1` (both cameras) mode the entire original composite is displayed and scaled to the available window. In `2` and `3` (single-camera) mode the original shared footer (left half, where the strip is encoded) is shown underneath the selected camera. No network video pixels, encoded metadata, or decoder logic are modified.
 
 Both Windows windows continue opening **maximized**, with `F` available for fullscreen. Pull the latest changes on both PCs and restart both applications.
+
+## Enlarged timestamp footer and latency chart legend
+
+The server and receiver now show a **display-only enlarged** copy of the original 168-bit binary timestamp/CRC16 row, scaled with nearest-neighbor to retain sharp black-and-white bars. The original encoded bit cells inside the multicast MPEG-TS frames are unchanged. The server footer also displays large LEFT and RIGHT UTC labels. The receiver displays both UTC timestamps in large type.
+
+The receiver latency graph now has a legend (**yellow line = estimated frame age, milliseconds**), top and bottom Y-axis numbers, and time/order direction toward newer frames. The chart is shown in its own HUD region to avoid overlapping text. Both windows still start maximized, and `F` toggles fullscreen.
+
+Pull on both machines and restart each program:
+```powershell
+git pull origin main
+```
