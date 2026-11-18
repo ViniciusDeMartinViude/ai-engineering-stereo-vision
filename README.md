@@ -1,3 +1,5 @@
+> **New experimental PySide6 + PyQtGraph client:** see [Qt Client Guide](docs/QT_CLIENT.md). Run `python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11` on this branch. The original Tkinter client is still included, and `main` is unchanged.
+
 # AI Engineering Stereo Vision
 
 Stereo vision capture and low-latency distribution for the Emirates Skills AI Engineering competition.
