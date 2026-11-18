@@ -384,6 +384,45 @@ def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
     return canvas, age_l, age_r, delta_us
 
 
+
+def desktop_dimensions():
+    """Return desktop dimensions without Qt/Tk."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        try:
+            user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+        return max(640, user32.GetSystemMetrics(0)), max(480, user32.GetSystemMetrics(1))
+    except (AttributeError, OSError):
+        return 1920, 1080
+
+
+def make_local_preview(frame, width, height, mode='fit', screen=None):
+    """Only modifies the server DISPLAY, never the outgoing UDP frame."""
+    sw, sh = screen if screen else desktop_dimensions()
+    area_w, area_h = max(400, sw - 50), max(300, sh - 120)
+    video = frame[:height, :, :]
+    if mode == 'left':
+        video = video[:, :width, :]
+    elif mode == 'right':
+        video = video[:, width:, :]
+    factor = min(area_w / video.shape[1], (area_h - 76) / video.shape[0], 1.0)
+    size = (max(1, round(video.shape[1] * factor)),
+            max(1, round(video.shape[0] * factor)))
+    if size != (video.shape[1], video.shape[0]):
+        video = cv2.resize(video, size, interpolation=cv2.INTER_AREA)
+    h, w = video.shape[:2]
+    preview = np.zeros((h + 76, w, 3), dtype=np.uint8)
+    preview[:h, :w] = video
+    cv2.putText(preview, f'VIEW: {mode.upper()}  |  1: BOTH   2: LEFT   3: RIGHT',
+                (14, h + 29), cv2.FONT_HERSHEY_SIMPLEX, .76, (245, 245, 245), 2, cv2.LINE_AA)
+    cv2.putText(preview, 'F: fullscreen   S: save original   Q/Esc: quit',
+                (14, h + 59), cv2.FONT_HERSHEY_SIMPLEX, .68, (210, 230, 210), 2, cv2.LINE_AA)
+    return preview
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dual-camera visual clock server, multi-client UDP unicast")
     parser.add_argument("--left", type=int, default=0)
@@ -398,6 +437,8 @@ def main():
     parser.add_argument("--port", type=int, default=5000, help="Default destination UDP port")
     parser.add_argument("--bitrate", type=int, default=3000, help="NVENC bitrate in kbps (default: known-good 3000)")
     parser.add_argument("--no-preview", action="store_true")
+    parser.add_argument("--preview-mode", choices=['fit','left','right'], default='fit',
+                        help='Local preview layout; changes only the server display')
     args = parser.parse_args()
     if args.left == args.right:
         parser.error("--left and --right must be different")
@@ -427,7 +468,12 @@ def main():
         publisher.start()
         print('UDP MPEG-TS NVENC fan-out:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
         print('168-bit binary timestamp + CRC16 unchanged from working UDP v1', flush=True)
-        print("Press Q/Esc to exit, S to save a screenshot.")
+        print("Preview: 1 both, 2 left, 3 right, F fullscreen, S screenshot, Q/Esc quit.")
+        preview_mode = args.preview_mode
+        fullscreen = False
+        window_title = 'Stereo Vision UDP Multi-client Server'
+        if not args.no_preview:
+            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         frame_number = 0
         period_ns = int(1e9 / args.fps)
         target_ns = time.monotonic_ns()
@@ -471,13 +517,16 @@ def main():
                 frame, age_l, age_r, delta = compose(l, r, frame_number, args.width, args.height)
                 publisher.send(frame)
                 if not args.no_preview:
-                    # Resize preview only; emitted UDP frames remain full-resolution.
-                    preview = frame
-                    if preview.shape[1] > 1280:
-                        scale = 1280 / preview.shape[1]
-                        preview = cv2.resize(preview, (1280, round(frame.shape[0] * scale)))
-                    cv2.imshow("Stereo Vision UDP Multi-client Server - Q to exit", preview)
+                    # Preview controls never change original encoded video / CRC footer.
+                    preview = make_local_preview(frame, args.width, args.height, preview_mode)
+                    cv2.imshow(window_title, preview)
                     key = cv2.waitKey(1) & 255
+                    if key in (ord('1'), ord('2'), ord('3')):
+                        preview_mode = {ord('1'): 'fit', ord('2'): 'left', ord('3'): 'right'}[key]
+                    if key in (ord('f'), ord('F')):
+                        fullscreen = not fullscreen
+                        cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN,
+                                              cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
                     if key in (27, ord('q'), ord('Q')):
                         break
                     if key in (ord('s'), ord('S')):
