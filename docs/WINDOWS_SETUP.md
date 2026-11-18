@@ -1,6 +1,6 @@
 # Windows setup — UDP unicast multi-client
 
-The current baseline uses **two Logitech MX Brio cameras**, **GStreamer**, **NVIDIA NVENC H.264**, **MPEG-TS over UDP unicast**, and the original **168-bit visual timestamp with CRC-16**.
+The current baseline uses **two Logitech MX Brio cameras**, **GStreamer**, **NVIDIA NVENC H.264**, **MPEG-TS over UDP multicast**, and the original **168-bit visual timestamp with CRC-16**.
 
 ## Server dependencies
 
@@ -129,3 +129,24 @@ python server/stereo_vision_server_multiclient.py --clients-file clients.txt --w
 ```
 
 If your computer is running at a different native desktop resolution, the viewer adapts its preview size automatically. The Windows preview is still constrained by the physical display; use single-camera focus mode to inspect more detail.
+
+## Multicast networking (default)
+
+Both programs default to `--transport multicast` with the administratively scoped IPv4 group `239.10.10.10` and UDP port `5000`. No per-client IP configuration is necessary:
+
+```powershell
+python server/stereo_vision_server_multiclient.py --width 1920 --height 1080 --fps 10 --format mjpeg --bitrate 12000
+python client/stereo_vision_client_multiclient.py --port 5000
+```
+
+Run the second command on each receiving machine. The receiver explicitly joins the multicast group using GStreamer's `udpsrc multicast-group` and `auto-multicast` properties. If Windows has multiple active network adapters, use `--multicast-iface` with the name expected by GStreamer or disable the unused adapter for testing. On the sender, `multiudpsink` sends one copy to the multicast group with multicast TTL=1 (local LAN only).
+
+**Important:** The TP-Link Archer C54 router's IPTV/VLAN page showing IGMP snooping enabled does not verify IGMP support on a separate Ethernet switch. Check the actual switch, keep sender and receivers on the same VLAN, and provide an IGMP querier if the switch's snooping implementation requires one. No need to enable IPTV/VLAN to use multicast.
+
+**Unicast fallback** for individual destinations:
+```powershell
+python server/stereo_vision_server_multiclient.py --transport unicast --clients-file clients.txt
+python client/stereo_vision_client_multiclient.py --transport unicast --port 5000
+```
+
+Use the local Windows firewall to permit inbound UDP port 5000 on the trusted private network. Change the group on both ends with `--multicast-group` if necessary. The video encoder, 168-bit strip and CRC-16 decoder are unchanged.
