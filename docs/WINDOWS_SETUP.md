@@ -113,3 +113,19 @@ python server/stereo_vision_server_multiclient.py --clients-file clients.txt --w
 ```
 
 Watch for `Stereo negotiated MATCHED capture mode`, or the explicit warning when a matching mode is unavailable. Check the **measured** FPS and timestamp skew; software-timestamp pairing is not the same as synchronized sensor exposure. Avoid using this stream for moving-object metric-depth measurements without calibration and motion-skew characterization.
+
+## Full HD preview and readable UI
+
+Both server and client now scale their **display** to the Windows monitor instead of forcing a 1280-pixel-wide preview. This leaves the original Full HD source frames and UDP binary timestamp encoding untouched.
+
+On the server: press `1` to view both cameras, `2` for a larger left-camera preview, `3` for a larger right-camera preview, `F` for fullscreen, `S` to save the original full-resolution composite, `Q` or Escape to exit.
+
+On a student client: the same `1`/`2`/`3` and `F` keys switch local display modes. Text in the dashboard is rendered at its final display size, preventing small letters from being shrunk alongside the video. The client continues decoding timestamps from the full incoming frame before applying any display crop.
+
+Example Full HD capture (the two 1920×1080 views are downscaled *only for viewing* on a Full HD monitor):
+
+```powershell
+python server/stereo_vision_server_multiclient.py --clients-file clients.txt --width 1920 --height 1080 --fps 10 --format mjpeg --bitrate 12000
+```
+
+If your computer is running at a different native desktop resolution, the viewer adapts its preview size automatically. The Windows preview is still constrained by the physical display; use single-camera focus mode to inspect more detail.
