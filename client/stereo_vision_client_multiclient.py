@@ -532,15 +532,20 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
     sw, sh = screen_size
     target_w = min(w, max(500, sw - 65))
     target_h = max(260, sh - 120)
-    # The binary timestamp is in the last 100 pixels of the ORIGINAL frame.
-    # The decoder has already read it; do not unnecessarily display tiny pixels.
+    # Keep the actual black/white 168-bit footer on screen, including
+    # when viewing just one camera. Decode still uses the raw original frame.
     video_h = max(1, h - 100)
-    video = frame[:video_h]
     half = w // 2
     if display_mode == 'left':
-        video = video[:, :half]
+        video = np.concatenate((frame[:video_h, :half, :],
+                                frame[video_h:, :half, :]), axis=0)
     elif display_mode == 'right':
-        video = video[:, half:]
+        # The timestamp strip is at the left edge of the shared footer.
+        # Show it beneath the right camera too.
+        video = np.concatenate((frame[:video_h, half:, :],
+                                frame[video_h:, :half, :]), axis=0)
+    else:
+        video = frame
     source_rgb = Image.fromarray(np.ascontiguousarray(video[:, :, ::-1]), mode='RGB')
     hud_height = min(285, max(215, round(target_h * .26)))
     video_limit = max(160, target_h - hud_height)
