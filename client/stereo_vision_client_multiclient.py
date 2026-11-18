@@ -740,7 +740,7 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
         color = (110, 240, 125) if side == 'LEFT' else (255, 140, 210)
         roi_draw.rectangle((x1, y1, x2, y2), outline=color, width=4)
         roi_draw.text((x1 + 5, y1 + 5), f'{side} ROI', fill=color)
-        output_width = max(new_w, min(target_w, 1040))
+    output_width = max(new_w, min(target_w, 1040))
     hud = Image.new('RGB', (output_width, hud_height), (16, 22, 31))
     draw = ImageDraw.Draw(hud)
     font_px = max(17, min(23, round(output_width / 85)))
