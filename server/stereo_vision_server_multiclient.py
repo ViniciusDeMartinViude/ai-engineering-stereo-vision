@@ -368,8 +368,14 @@ def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
     canvas[:height, :width] = left.pixels
     canvas[:height, width:] = right.pixels
     cv2.rectangle(canvas, (0, height), (width * 2, height + FOOTER_H), (35, 35, 35), -1)
-    cv2.putText(canvas, "LEFT", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, .8, (255, 255, 255), 2)
-    cv2.putText(canvas, "RIGHT", (width + 15, 30), cv2.FONT_HERSHEY_SIMPLEX, .8, (255, 255, 255), 2)
+    # Larger native-resolution labels remain legible after display downscaling.
+    header_scale = max(.8, min(2.0, width / 850.0))
+    header_thick = max(2, round(header_scale * 2))
+    header_y = max(30, round(34 * header_scale))
+    cv2.putText(canvas, "LEFT", (15, header_y), cv2.FONT_HERSHEY_SIMPLEX,
+                header_scale, (255, 255, 255), header_thick, cv2.LINE_AA)
+    cv2.putText(canvas, "RIGHT", (width + 15, header_y), cv2.FONT_HERSHEY_SIMPLEX,
+                header_scale, (255, 255, 255), header_thick, cv2.LINE_AA)
     now_ns = time.time_ns()
     cv2.putText(canvas, "L: " + timestamp_text(left.captured_ns), (12, height + 25),
                 cv2.FONT_HERSHEY_SIMPLEX, .50, (255, 255, 255), 1, cv2.LINE_AA)
