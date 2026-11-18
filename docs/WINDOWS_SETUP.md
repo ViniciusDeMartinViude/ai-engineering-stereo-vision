@@ -98,3 +98,18 @@ Watch the console for \`Camera 0: selected ...\` and \`Camera 1: selected ...\`.
 - Persistent \`not-negotiated\` errors with all modes indicate a driver/device/USB negotiation problem that software fallback may not resolve.
 
 **Note:** Input fallback can resize a lower-resolution camera image; this does not create real detail. For stereo depth work, prefer identical native capture resolutions and carefully calibrated manual focus on both cameras.
+
+## Coordinated stereo-mode negotiation
+
+The current server tests **matching input capture modes** on both cameras before accepting independent fallbacks. It keeps native dimensions and FPS matched where possible, rather than accepting a left camera at 10 FPS and right camera at 30 FPS solely because those worked first. It tests up to 24 shared modes; unsuccessful attempts may take time. For each candidate it requires both cameras to deliver a real image.
+
+If no shared mode works, the server uses per-camera fallback as before and prints a warning. It also prints *measured* callback FPS for both cameras every 5 seconds, because a requested FPS does not guarantee an actual FPS.
+
+Run on the capture server:
+
+```powershell
+git pull origin main
+python server/stereo_vision_server_multiclient.py --clients-file clients.txt --width 640 --height 480 --fps 10 --format mjpeg --bitrate 3000
+```
+
+Watch for `Stereo negotiated MATCHED capture mode`, or the explicit warning when a matching mode is unavailable. Check the **measured** FPS and timestamp skew; software-timestamp pairing is not the same as synchronized sensor exposure. Avoid using this stream for moving-object metric-depth measurements without calibration and motion-skew characterization.
