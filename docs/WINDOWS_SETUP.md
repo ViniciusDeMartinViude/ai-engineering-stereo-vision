@@ -73,3 +73,28 @@ Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.AddressState -eq 'Prefer
 - Apparent one-way frame age can be biased by host clock offsets; synchronize clocks before interpreting it as absolute latency.
 - UDP has no retransmission or guaranteed delivery. If losses increase, check link utilization, switch congestion and receiver processing.
 - WebRTC/WebSocket prototypes are not required for this baseline.
+
+
+## Automatic camera negotiation (current server)
+
+The server first tests the requested camera input mode, then independently tries alternate MJPEG and YUY2 capture modes at the configured resolution, 1280×720, and 640×480, including common 10/15/30 FPS rates and unconstrained frame rate. It **accepts a mode only after an actual frame arrives**, not just when GStreamer enters PLAYING. Each successful capture is normalized to the configured outgoing resolution. Different input modes may be selected for the left and right cameras.
+
+If a camera later produces a GStreamer error or stops delivering frames for 5 seconds, the server attempts to reconnect it, prioritizing its last working mode. If all modes fail, it retries after a short cooldown without terminating the UDP publisher. Expect temporary gaps in the stereo stream during recovery.
+
+Example:
+
+\`\`\`powershell
+python server/stereo_vision_server_multiclient.py --clients-file clients.txt --width 640 --height 480 --fps 10 --format mjpeg
+\`\`\`
+
+Watch the console for \`Camera 0: selected ...\` and \`Camera 1: selected ...\`. They can differ. The output FPS and pixel dimensions do not need to match either camera's capture format exactly.
+
+### If no capture mode works
+
+- Close Logi Options+, Teams, and other applications that might access the webcams.
+- Unplug and reconnect the cameras directly to USB ports, then restart the server.
+- Confirm the correct DirectShow device indexes; connecting to a different USB port can reorder them.
+- Inspect supported modes with FFmpeg: \`ffmpeg -list_devices true -f dshow -i dummy\`, followed by \`ffmpeg -f dshow -list_options true -i video="EXACT DEVICE NAME"\`.
+- Persistent \`not-negotiated\` errors with all modes indicate a driver/device/USB negotiation problem that software fallback may not resolve.
+
+**Note:** Input fallback can resize a lower-resolution camera image; this does not create real detail. For stereo depth work, prefer identical native capture resolutions and carefully calibrated manual focus on both cameras.
