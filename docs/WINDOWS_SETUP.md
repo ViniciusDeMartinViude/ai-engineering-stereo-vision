@@ -150,3 +150,28 @@ python client/stereo_vision_client_multiclient.py --transport unicast --port 500
 ```
 
 Use the local Windows firewall to permit inbound UDP port 5000 on the trusted private network. Change the group on both ends with `--multicast-group` if necessary. The video encoder, 168-bit strip and CRC-16 decoder are unchanged.
+
+## Multicast troubleshooting: waiting for UDP frames
+
+A client opening its preview but showing no video is not enough to identify the cause: no multicast packets, wrong receiving interface, Windows Firewall, or MPEG-TS decoding are all possible.
+
+1. On both PCs run `Get-NetIPConfiguration` to identify **each machine's own Ethernet IPv4**.
+2. Temporarily close the video client and run the raw Python probe (no GStreamer/encoder):
+   - On the student receiver: `python tools/multicast_probe.py receive --iface-ip RECEIVER_ETHERNET_IP`
+   - On the camera server: `python tools/multicast_probe.py send --iface-ip SERVER_ETHERNET_IP`
+3. The probe uses **UDP 5001** to avoid interfering with the MPEG-TS stream on 5000. Allow inbound UDP 5001 on the trusted Private LAN for this test. The receiving screen should show `RECEIVED` every second.
+4. If the probe receives nothing, check sender and receiver are on the same VLAN, actual switch IGMP snooping/querier, and any Windows VPN/virtual Ethernet adapters. IGMP settings in the router screenshot alone do not establish that the switch is forwarding multicast.
+5. If the probe works, inspect network and video separately:
+   ```powershell
+   # Receiver: count raw MPEG-TS packets using GStreamer; stop video client first
+   gst-launch-1.0 -v udpsrc multicast-group=239.10.10.10 auto-multicast=true port=5000 ! fakesink dump=false
+   ```
+   If this receives data, isolate the GStreamer caps / MPEG-TS decoder next.
+
+You can always revert to tested unicast without changing code:
+```powershell
+# Server
+python server/stereo_vision_server_multiclient.py --transport unicast --clients-file clients.txt
+# Receiver
+python client/stereo_vision_client_multiclient.py --transport unicast --port 5000
+```
