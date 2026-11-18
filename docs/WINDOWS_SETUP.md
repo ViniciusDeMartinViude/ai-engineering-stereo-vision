@@ -175,3 +175,22 @@ python server/stereo_vision_server_multiclient.py --transport unicast --clients-
 # Receiver
 python client/stereo_vision_client_multiclient.py --transport unicast --port 5000
 ```
+
+## Video multicast diagnosis: the 5001 probe passes, but no picture
+
+The generic probe on UDP 5001 only establishes that the LAN can carry multicast packets. It does **not** prove that the GStreamer process is sending MPEG-TS on UDP 5000 or using the same network interface.
+
+1. Stop the student video client, keep the camera server running, and inspect server logs. The report now prints `UDP sink sent=...B rate=...Mbps` every five seconds. If it stays zero, check the NVENC encoder and multicast fanout.
+2. On a receiving PC, use its own local Ethernet IPv4 address:
+   ```powershell
+   python tools/multicast_video_probe.py --iface-ip RECEIVER_ETHERNET_IPV4
+   ```
+   This test listens on the **actual video port 5000**, joins `239.10.10.10` on the specified adapter, and validates raw MPEG-TS sync bytes `0x47` at 188-byte boundaries. Stop the normal client first to avoid port conflicts.
+3. If no packets arrive on port 5000 while UDP sink bytes are increasing, the sender may be using another NIC. Check network adapters on the source with `Get-NetAdapter` and compare GStreamer's multicast interface setting with the successful Python probe. The `--multicast-iface` argument is an optional GStreamer **interface name**, not necessarily an IPv4 address; actual naming depends on the Windows/GStreamer build.
+4. If MPEG-TS packets arrive but no video is decoded, run a standalone receiver:
+   ```powershell
+   gst-launch-1.0 -v udpsrc multicast-group=239.10.10.10 auto-multicast=true port=5000 caps="video/mpegts,systemstream=(boolean)true,packetsize=(int)188" ! tsparse ! tsdemux ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false
+   ```
+   Some builds require `tsdemux name=d d. ! h264parse ...` for a dynamic pad. Look for error messages or whether video appears.
+
+Avoid modifying the CRC decoder until actual MPEG-TS/H.264 frame delivery is confirmed. The unicast fallback remains available.
