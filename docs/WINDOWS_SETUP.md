@@ -213,3 +213,31 @@ The server requires **no changes**. The relay does not transcode, alter timestam
 If UDP port 15000 is already in use by another local process, specify `--relay-port 15001`. Stop the raw multicast video probe and other video clients before starting this application.
 
 The direct GStreamer multicast pipeline is still available as a diagnostic, and may work if the correct Ethernet interface is explicitly chosen. The Python relay is the current default Windows workaround because the raw socket test proved the interface can receive packets.
+
+## LAN clock alignment and maximized windows
+
+The **camera server** starts a small NTP/SNTP-compatible LAN service on **UDP port 9123** by default. This uses its **Windows system clock** as the reference; it does not discipline that clock from an external NTP source. Standard Windows Time may already use UDP 123, so the independent service uses 9123 to avoid a port conflict.
+
+On the source machine, allow inbound UDP 9123 only on the trusted Private LAN (PowerShell as Administrator):
+
+```powershell
+New-NetFirewallRule -DisplayName "Stereo Vision LAN SNTP" -Direction Inbound -Protocol UDP -LocalPort 9123 -Action Allow -Profile Private
+```
+
+Start the server normally (the clock service is enabled by default):
+
+```powershell
+python server/stereo_vision_server_multiclient.py --width 1920 --height 1080 --fps 10 --format mjpeg --bitrate 12000
+```
+
+On **each client**, supply the server's Ethernet IP. For this deployment the camera server was `192.168.0.10` and the sample student receiver was `192.168.0.11`:
+
+```powershell
+python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11 --time-server 192.168.0.10
+```
+
+At startup the client requests 7 SNTP time samples, selects the lowest network RTT, reports the client-minus-server offset, and **subtracts it from apparent frame-age calculations**. It does **not change the Windows system clock** or require administrator privileges on student clients. Use `--ntp-port` on both sides to change the port, or `--no-time-sync` on the client to disable. If the time server cannot be reached, the client warns and continues with uncorrected frame age. `--clock-offset-ms` adds an optional manual correction.
+
+Both preview windows now open **maximized** on Windows (showing the taskbar). Press `F` for borderless fullscreen when desired.
+
+**Interpretation:** The displayed video frame age is an estimate relative to the camera server's Windows clock. It can still include network asymmetry and timestamps taken after physical exposure. NTP correction cannot eliminate actual MPEG-TS/H.264 buffering, so an apparent three-second delay that persists after synchronization is a real pipeline-latency problem to investigate separately.
