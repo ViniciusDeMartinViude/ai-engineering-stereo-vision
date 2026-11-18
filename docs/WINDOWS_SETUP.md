@@ -287,3 +287,27 @@ The pretrained model file may be downloaded by Ultralytics if not present; a cus
 **Architecture:** Each decoded stereo frame is split into LEFT and RIGHT camera images; a separate worker batches the two views for YOLO. Its pending input buffer has only one slot, so a slow model processes the newest available frame instead of accumulating seconds of extra latency. YOLO inference does not block the multicast decoder, NTP synchronization or the Tkinter video UI. Bounding boxes are mapped from each camera's original pixel coordinates into the selected display mode (both / left / right). Results older than one second since inference completed are hidden.
 
 This adds object detection only, **not** stereo matching, depth calculation or 3D object coordinates. To estimate height/depth, the cameras still require calibrated intrinsics, extrinsics and temporal pairing.
+
+## Interactive left/right YOLO regions of interest
+
+The stereo client now offers four buttons in the maximized window toolbar:
+
+- **Select LEFT ROI**: switches to left camera view, then drag a rectangle with the left mouse button; the green outline marks the left camera's active detection region
+- **Reset LEFT**: restores YOLO inference on the full left camera image
+- **Select RIGHT ROI**: switches to right camera view, then drag to choose its independent region; the pink outline marks the right selection
+- **Reset RIGHT**: restores inference on the full right camera image
+
+The two camera selections can be different. Clicking **1** shows both cameras and both ROI outlines together; **2** and **3** switch back to individual views. Each crop uses original camera pixel coordinates, independent of screen scaling or maximized mode. A selection narrower than 16 source pixels or shorter than 16 source pixels is ignored.
+
+When YOLO is enabled with `--yolo-model`, each camera is cropped to its own ROI **before** inference. Its detection boxes are translated back into original camera coordinates before being displayed. Changing an ROI invalidates the previous YOLO detections. Without a YOLO model the colored ROI outlines can still be selected and displayed.
+
+These controls only affect the local receiving client. The original multicast video, full-resolution camera pixels, NTP timing and embedded binary CRC16 strip are not altered.
+
+After pulling:
+
+```powershell
+python client/stereo_vision_client_multiclient.py --self-test
+python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11 --time-server 192.168.0.10 --yolo-model yolo26n.pt
+```
+
+No changes are needed on the camera server.
