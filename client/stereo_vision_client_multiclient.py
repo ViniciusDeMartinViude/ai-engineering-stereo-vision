@@ -35,6 +35,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from yolo_detector import YoloWorker
+from stereo_roi import preview_layout, normalized_roi
 
 MAGIC = 0xA55A
 VERSION = 1
@@ -427,6 +428,12 @@ def main():
     closing = False
     display_mode = args.display_mode
     fullscreen = False
+    rois = {'LEFT': None, 'RIGHT': None}
+    select_side = None
+    drag_start = None
+    drag_end = None
+    raw_frame_shape = None
+    preview_geometry = None
     root = None
     panel = None
     if not args.no_preview:
@@ -436,8 +443,103 @@ def main():
             root.state('zoomed')  # Windows maximized, not exclusive fullscreen
         except tk.TclError:
             root.attributes('-zoomed', True)
+        toolbar = tk.Frame(root, bg='#152030')
+        toolbar.pack(side='top', fill='x')
         panel = tk.Label(root, bg='black')
         panel.pack(fill='both', expand=True)
+
+        roi_info = tk.StringVar(value='ROI LEFT: full image  |  RIGHT: full image')
+        tk.Label(toolbar, textvariable=roi_info, bg='#152030', fg='#e5edf5',
+                 font=('Arial', 11)).pack(side='right', padx=12)
+
+        def refresh_roi_info():
+            def summary(side):
+                bounds = rois[side]
+                if bounds is None:
+                    return 'full image'
+                x1, y1, x2, y2 = bounds
+                return f'({x1},{y1}) {x2-x1}x{y2-y1}'
+            roi_info.set(f'LEFT: {summary("LEFT")}  |  RIGHT: {summary("RIGHT")}')
+
+        def activate_roi(side):
+            nonlocal select_side, display_mode, drag_start, drag_end
+            select_side = side
+            display_mode = side.lower()
+            drag_start = drag_end = None
+            print(f'Select {side} ROI: drag a rectangle on the image.', flush=True)
+
+        def reset_roi(side):
+            nonlocal select_side, drag_start, drag_end
+            rois[side] = None
+            if yolo:
+                yolo.set_roi(side, None)
+            if select_side == side:
+                select_side = None
+            drag_start = drag_end = None
+            refresh_roi_info()
+            print(f'{side} ROI cleared: YOLO uses entire camera image.', flush=True)
+
+        tk.Button(toolbar, text='Select LEFT ROI',
+                  command=lambda: activate_roi('LEFT')).pack(side='left', padx=5, pady=5)
+        tk.Button(toolbar, text='Reset LEFT',
+                  command=lambda: reset_roi('LEFT')).pack(side='left', padx=3)
+        tk.Button(toolbar, text='Select RIGHT ROI',
+                  command=lambda: activate_roi('RIGHT')).pack(side='left', padx=12)
+        tk.Button(toolbar, text='Reset RIGHT',
+                  command=lambda: reset_roi('RIGHT')).pack(side='left', padx=3)
+
+        def pointer_to_camera(event):
+            if raw_frame_shape is None or preview_geometry is None:
+                return None
+            layout, displayed_width, image_height = preview_geometry
+            if select_side is None or layout.mode != select_side.lower():
+                return None
+            # Tk Labels center images when the containing window is larger.
+            image_left = max(0, (panel.winfo_width() - displayed_width) // 2)
+            image_top = max(0, (panel.winfo_height() - (image_height + 350)) // 2)
+            return layout.point(event.x - image_left, event.y - image_top)
+
+        def roi_press(event):
+            nonlocal drag_start, drag_end
+            start = pointer_to_camera(event)
+            if start is not None:
+                drag_start = drag_end = start
+
+        def roi_drag(event):
+            nonlocal drag_end
+            if drag_start is not None:
+                # Clamp the point while dragging beyond the image boundary.
+                layout, displayed_width, image_height = preview_geometry
+                image_left = max(0, (panel.winfo_width() - displayed_width) // 2)
+                image_top = max(0, (panel.winfo_height() - (image_height + 350)) // 2)
+                px = min(max(event.x - image_left, layout.left),
+                         layout.left + layout.width - 1)
+                py = min(max(event.y - image_top, layout.top),
+                         layout.top + layout.height - 1)
+                drag_end = layout.point(px, py)
+
+        def roi_release(event):
+            nonlocal drag_start, drag_end, select_side
+            if drag_start is None or drag_end is None or select_side is None:
+                return
+            _, w = raw_frame_shape[:2]
+            bounds = normalized_roi(drag_start, drag_end, w // 2,
+                                    raw_frame_shape[0] - 100)
+            if bounds:
+                side = select_side
+                rois[side] = bounds
+                if yolo:
+                    yolo.set_roi(side, bounds)
+                print(f'{side} ROI selected: {bounds} (native camera pixels)', flush=True)
+                refresh_roi_info()
+                select_side = None
+            else:
+                print('ROI too small; drag at least 16 x 16 source pixels.', flush=True)
+            drag_start = drag_end = None
+
+        panel.bind('<ButtonPress-1>', roi_press)
+        panel.bind('<B1-Motion>', roi_drag)
+        panel.bind('<ButtonRelease-1>', roi_release)
         def quit_app(event=None):
             nonlocal closing
             closing = True
@@ -488,6 +590,10 @@ def main():
             frame, receive_ns, count = client.latest()
             if frame is not None and frame.ndim == 3 and frame.shape[0] > 0 and frame.shape[1] > 0 and count != count_processed:
                 count_processed = count
+                raw_frame_shape = frame.shape
+                preview_geometry = preview_layout(
+                    frame.shape, (root.winfo_screenwidth(), root.winfo_screenheight()),
+                    display_mode) if root is not None else None
                 if yolo:
                     yolo.submit(frame, count)
                 stamp, error = decode_strip(frame)
@@ -514,7 +620,9 @@ def main():
                                                 screen_size=(root.winfo_screenwidth(), root.winfo_screenheight()),
                                                 display_mode=display_mode,
                                                 yolo_result=yolo.snapshot() if yolo else None,
-                                                frame_id=count)
+                                                frame_id=count,
+                                                rois=rois, active_side=select_side,
+                                                drag_points=(drag_start, drag_end))
                     photo = ImageTk.PhotoImage(last_preview, master=root)
                     panel.configure(image=photo)
                     panel.image = photo
@@ -546,7 +654,8 @@ def main():
 def make_preview(frame, stamp, port, count, valid, invalid, skipped,
                  age_ms, age_right_ms, recent_ages, recent_offsets, last_issue,
                  clock_offset_ms, screen_size=None, display_mode='both',
-                 yolo_result=None, frame_id=None):
+                 yolo_result=None, frame_id=None, rois=None,
+                 active_side=None, drag_points=(None, None)):
     """Maximized display with legible timestamps, barcode and graphed latency.
 
     The original decoded frame and its 168-bit CRC are NEVER modified.
@@ -608,7 +717,30 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
                 ly = max(0, y1 - label_h)
                 draw_boxes.rectangle((x1, ly, x1 + label_w, ly + label_h), fill=color)
                 draw_boxes.text((x1 + 5, ly + 3), title, font=box_font, fill=(15, 20, 25))
-    output_width = max(new_w, min(target_w, 1040))
+    # ROI outlines are drawn on the display only. The source frame, timestamp
+    # and underlying YOLO crops remain unmodified.
+    roi_draw = ImageDraw.Draw(source_rgb)
+    sx, sy = new_w / video.shape[1], new_h / video.shape[0]
+    for side in ('LEFT', 'RIGHT'):
+        bounds = rois.get(side) if rois else None
+        if active_side == side and all(p is not None for p in drag_points):
+            x1, y1 = drag_points[0]
+            x2, y2 = drag_points[1]
+            bounds = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        if bounds is None:
+            continue
+        if display_mode == 'left' and side != 'LEFT':
+            continue
+        if display_mode == 'right' and side != 'RIGHT':
+            continue
+        offset_x = half if display_mode == 'both' and side == 'RIGHT' else 0
+        x1, y1, x2, y2 = bounds
+        x1, x2 = (x1 + offset_x) * sx, (x2 + offset_x) * sx
+        y1, y2 = y1 * sy, y2 * sy
+        color = (110, 240, 125) if side == 'LEFT' else (255, 140, 210)
+        roi_draw.rectangle((x1, y1, x2, y2), outline=color, width=4)
+        roi_draw.text((x1 + 5, y1 + 5), f'{side} ROI', fill=color)
+        output_width = max(new_w, min(target_w, 1040))
     hud = Image.new('RGB', (output_width, hud_height), (16, 22, 31))
     draw = ImageDraw.Draw(hud)
     font_px = max(17, min(23, round(output_width / 85)))
