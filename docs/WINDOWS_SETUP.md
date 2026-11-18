@@ -194,3 +194,22 @@ The generic probe on UDP 5001 only establishes that the LAN can carry multicast 
    Some builds require `tsdemux name=d d. ! h264parse ...` for a dynamic pad. Look for error messages or whether video appears.
 
 Avoid modifying the CRC decoder until actual MPEG-TS/H.264 frame delivery is confirmed. The unicast fallback remains available.
+
+## Windows GStreamer multicast interface workaround
+
+If `tools/multicast_video_probe.py` receives valid MPEG-TS datagrams but GStreamer is silent at the `udpsrc`, GStreamer may have joined the wrong NIC. The latest **multicast client** uses the same proven Python socket join as the probe, then forwards the original packets, byte-for-byte, to GStreamer over `127.0.0.1:15000`.
+
+On the receiver `192.168.0.11`:
+
+```powershell
+git pull origin main
+python client/stereo_vision_client_multiclient.py --port 5000 --iface-ip 192.168.0.11
+```
+
+On other receivers, replace `--iface-ip` with **that receiver's own Ethernet IPv4**. This is mandatory in multicast mode. Do **not** provide the camera server IP or router IP.
+
+The server requires **no changes**. The relay does not transcode, alter timestamps or change UDP packet contents. It does add a loopback pass and small CPU overhead. Expect status output to show `multicast_udp=...` increasing even before decoded video appears. If that counter increases but `decoded=0`, investigate MPEG-TS demux/decoder rather than multicast delivery.
+
+If UDP port 15000 is already in use by another local process, specify `--relay-port 15001`. Stop the raw multicast video probe and other video clients before starting this application.
+
+The direct GStreamer multicast pipeline is still available as a diagnostic, and may work if the correct Ethernet interface is explicitly chosen. The Python relay is the current default Windows workaround because the raw socket test proved the interface can receive packets.
