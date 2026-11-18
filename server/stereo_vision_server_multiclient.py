@@ -322,6 +322,14 @@ class UdpPublisher:
         if self.pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             raise RuntimeError('UDP multi-client NVENC pipeline could not start')
 
+    def stats(self):
+        """GStreamer UDP sink counters; bytes-served increases when it sends UDP data."""
+        try:
+            return (int(self.fanout.get_property('bytes-served')),
+                    int(self.fanout.get_property('bytes-to-serve')))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     def send(self, frame):
         raw = frame.tobytes()
         gstbuffer = Gst.Buffer.new_allocate(None, len(raw), None)
@@ -513,6 +521,7 @@ def main():
         period_ns = int(1e9 / args.fps)
         target_ns = time.monotonic_ns()
         last_report = time.monotonic()
+        previous_udp_bytes = 0
         retry_after = {left.index: 0.0, right.index: 0.0}
         last_counts = {left.index: (left.frames, time.monotonic()),
                        right.index: (right.frames, time.monotonic())}
@@ -577,10 +586,18 @@ def main():
                         .001, now_report - last_counts[left.index][1])
                     right_fps = (right.frames - last_counts[right.index][0]) / max(
                         .001, now_report - last_counts[right.index][1])
+                    traffic = publisher.stats()
+                    if traffic is not None:
+                        udp_bytes, queued_bytes = traffic
+                        rate = max(0, udp_bytes - previous_udp_bytes) * 8 / max(.001, now_report - last_report) / 1e6
+                        previous_udp_bytes = udp_bytes
+                        traffic_note = f" | UDP sink sent={udp_bytes}B rate={rate:.2f}Mbps"
+                    else:
+                        traffic_note = ''
                     print(f"Pair {frame_number} | source ages: L={age_l:.0f}ms R={age_r:.0f}ms | "
                           f"camera measured FPS: L={left_fps:.1f} R={right_fps:.1f} | "
-                          f"callbacks: L={l.count} R={r.count} | skew={delta/1000:.1f}ms",
-                          flush=True)
+                          f"callbacks: L={l.count} R={r.count} | skew={delta/1000:.1f}ms"
+                          f"{traffic_note}", flush=True)
                     last_counts = {left.index: (left.frames, now_report),
                                    right.index: (right.frames, now_report)}
                     last_report = now_report
