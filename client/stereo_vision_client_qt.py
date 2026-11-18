@@ -170,7 +170,6 @@ class CameraPanel(QtWidgets.QFrame):
             self.roi_box = pg.RectROI((x1, y1), (x2-x1, y2-y1),
                                       pen=pg.mkPen(self.color, width=3),
                                       movable=True, rotatable=False,
-                                      resizable=True,
                                       sideScalers=False)
             self.roi_box.addScaleHandle((1, 1), (0, 0))
             self.roi_box.addScaleHandle((0, 0), (1, 1))
@@ -459,18 +458,29 @@ def build_parser():
     p.add_argument('--yolo-conf', type=float, default=0.35)
     p.add_argument('--yolo-imgsz', type=int, default=640)
     p.add_argument('--yolo-device', default='auto')
+    p.add_argument('--self-test', action='store_true',
+                   help='Test Qt image/ROI controls without using the network')
     return p
 
 
 def main():
     p = build_parser()
     args = p.parse_args()
-    if args.transport == 'multicast' and not args.iface_ip:
+    if args.transport == 'multicast' and not args.iface_ip and not args.self_test:
         p.error('Multicast requires --iface-ip LOCAL_ETHERNET_IP')
     if not 0 < args.yolo_conf <= 1:
         p.error('YOLO confidence must be in (0,1]')
     app = QtWidgets.QApplication(sys.argv[:1])
     app.setStyle('Fusion')
+    if args.self_test:
+        panel = CameraPanel('LEFT', '#70e4a6')
+        panel.set_image(np.zeros((480, 640, 3), dtype=np.uint8))
+        panel._set_roi((30, 40, 250, 300), emit=False)
+        assert panel.bounds == (30, 40, 250, 300)
+        panel.clear_roi()
+        assert panel.bounds is None
+        print('PASS: PySide6 + PyQtGraph image and ROI controls')
+        return 0
     studio = Studio(args)
     studio.showMaximized()
     return app.exec()
