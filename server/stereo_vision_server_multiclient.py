@@ -80,18 +80,26 @@ class Camera:
         self.modes = self._build_modes(fmt)
 
     def _build_modes(self, preferred):
-        # Exact requested mode first, then standard webcam rates, then a mode
-        # without an explicit FPS restriction. Try YUY2 if MJPEG does not work.
-        sizes = [(self.width, self.height), (1280, 720), (640, 480)]
-        sizes = list(dict.fromkeys(sizes))
+        # Prefer a common native resolution and explicit identical capture FPS.
+        # Keep the requested mode first, but prefer standard 30 FPS next;
+        # only use unbounded (driver-selected) rates as a final fallback.
+        sizes = list(dict.fromkeys([(self.width, self.height), (1280, 720), (640, 480)]))
         formats = [preferred, 'yuy2' if preferred == 'mjpeg' else 'mjpeg']
-        rates = list(dict.fromkeys([self.fps, 30, 15, 10, None]))
+        rates = list(dict.fromkeys([self.fps, 30, 15, 10]))
         modes = []
         for w, h in sizes:
-            for fmt in formats:
-                for rate in rates:
+            for rate in rates:
+                for fmt in formats:
                     modes.append((fmt, w, h, rate))
+        for w, h in sizes:
+            for fmt in formats:
+                modes.append((fmt, w, h, None))
         return modes
+
+    @staticmethod
+    def mode_label(mode):
+        fmt, w, h, rate = mode
+        return f'{fmt.upper()} {w}x{h} at {rate if rate is not None else "auto"} FPS'
 
     def _make_pipeline(self, mode):
         fmt, w, h, rate = mode
@@ -158,41 +166,41 @@ class Camera:
             self.latest = None
             self.last_frame = 0.0
 
-    def start(self, retry_favorite=False):
-        favorite = self.active_mode if retry_favorite else None
-        attempts = [favorite] + self.modes if favorite else self.modes
-        attempts = list(dict.fromkeys(attempts))
-        previous = None
-        for mode in attempts:
-            self.stop()
-            fmt, w, h, rate = mode
-            label = f'{fmt.upper()} {w}x{h} at {rate if rate is not None else "auto"} FPS'
+    def try_mode(self, mode, timeout=1.8, quiet=False):
+        """Return (success, diagnostic). A real received frame is required."""
+        self.stop()
+        label = self.mode_label(mode)
+        if not quiet:
             print(f'Camera {self.index}: trying {label}', flush=True)
-            try:
-                self._make_pipeline(mode)
-                result = self.pipeline.set_state(Gst.State.PLAYING)
-                if result == Gst.StateChangeReturn.FAILURE:
-                    previous = 'pipeline could not enter PLAYING'
-                    continue
-                # PLAYING can succeed even if DirectShow immediately rejects
-                # its caps; confirm a real decoded frame is delivered.
-                deadline = time.monotonic() + 1.8
-                while time.monotonic() < deadline:
-                    failure = self.error()
-                    if failure:
-                        previous = failure
-                        break
-                    if self.read_latest() is not None:
-                        self.active_mode = mode
+        try:
+            self._make_pipeline(mode)
+            result = self.pipeline.set_state(Gst.State.PLAYING)
+            if result == Gst.StateChangeReturn.FAILURE:
+                return False, 'pipeline could not enter PLAYING'
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                failure = self.error()
+                if failure:
+                    return False, failure
+                if self.read_latest() is not None:
+                    self.active_mode = mode
+                    if not quiet:
                         print(f'Camera {self.index}: selected {label} -> output '
                               f'{self.width}x{self.height}', flush=True)
-                        return
-                    time.sleep(0.05)
-                else:
-                    previous = 'no frames delivered within 1.8 seconds'
-            except Exception as exc:
-                previous = str(exc)
-                print(f'Camera {self.index}: mode failed: {previous}', flush=True)
+                    return True, ''
+                time.sleep(0.04)
+            return False, f'no frames within {timeout:.1f}s'
+        except Exception as exc:
+            return False, str(exc)
+
+    def start(self, retry_favorite=False):
+        favorite = self.active_mode if retry_favorite else None
+        attempts = list(dict.fromkeys(([favorite] if favorite else []) + self.modes))
+        previous = None
+        for mode in attempts:
+            ok, previous = self.try_mode(mode)
+            if ok:
+                return
         self.stop()
         raise RuntimeError(
             f'Camera {self.index}: no compatible capture mode among {len(attempts)} attempts. '
@@ -203,6 +211,38 @@ class Camera:
     def stalled(self, timeout=5.0):
         with self.lock:
             return bool(self.last_frame) and time.monotonic() - self.last_frame > timeout
+
+
+def negotiate_stereo_pair(left, right, max_attempts=24):
+    """Prefer an identical native capture mode for both physical cameras.
+
+    Test each camera sequentially, but require both to deliver real frames
+    before accepting the candidate. If no shared mode works, keep independent
+    fallbacks available rather than preventing the entire server from running.
+    """
+    candidates = left.modes[:max_attempts]
+    print(f'Stereo negotiation: testing up to {len(candidates)} shared modes', flush=True)
+    for mode in candidates:
+        label = Camera.mode_label(mode)
+        left_ok, left_issue = left.try_mode(mode, timeout=1.25, quiet=True)
+        if not left_ok:
+            left.stop()
+            print(f'  Shared {label}: left unavailable ({left_issue})', flush=True)
+            continue
+        right_ok, right_issue = right.try_mode(mode, timeout=1.25, quiet=True)
+        if right_ok:
+            print(f'Stereo negotiated MATCHED capture mode: {label}', flush=True)
+            return True
+        print(f'  Shared {label}: right unavailable ({right_issue})', flush=True)
+        left.stop()
+        right.stop()
+    print('WARNING: no shared capture mode found; using independent fallbacks. '
+          'This may cause stereo timestamp skew.', flush=True)
+    left.start(retry_favorite=True)
+    right.start(retry_favorite=True)
+    print('Capture modes: LEFT=' + Camera.mode_label(left.active_mode) +
+          ', RIGHT=' + Camera.mode_label(right.active_mode), flush=True)
+    return False
 
 
 def parse_clients(entries, port):
@@ -383,8 +423,7 @@ def main():
     next_reload = time.monotonic() + 2.0
     print("Starting cameras...", flush=True)
     try:
-        left.start()
-        right.start()
+        negotiate_stereo_pair(left, right)
         publisher.start()
         print('UDP MPEG-TS NVENC fan-out:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
         print('168-bit binary timestamp + CRC16 unchanged from working UDP v1', flush=True)
@@ -394,6 +433,8 @@ def main():
         target_ns = time.monotonic_ns()
         last_report = time.monotonic()
         retry_after = {left.index: 0.0, right.index: 0.0}
+        last_counts = {left.index: (left.frames, time.monotonic()),
+                       right.index: (right.frames, time.monotonic())}
         while True:
             if args.clients_file and time.monotonic() >= next_reload:
                 next_reload = time.monotonic() + 2.0
@@ -444,9 +485,18 @@ def main():
                         cv2.imwrite(name, frame)
                         print("Saved", name)
                 if time.monotonic() - last_report >= 5:
+                    now_report = time.monotonic()
+                    left_fps = (left.frames - last_counts[left.index][0]) / max(
+                        .001, now_report - last_counts[left.index][1])
+                    right_fps = (right.frames - last_counts[right.index][0]) / max(
+                        .001, now_report - last_counts[right.index][1])
                     print(f"Pair {frame_number} | source ages: L={age_l:.0f}ms R={age_r:.0f}ms | "
-                          f"camera callbacks: L={l.count} R={r.count} | delta={delta/1000:.1f}ms", flush=True)
-                    last_report = time.monotonic()
+                          f"camera measured FPS: L={left_fps:.1f} R={right_fps:.1f} | "
+                          f"callbacks: L={l.count} R={r.count} | skew={delta/1000:.1f}ms",
+                          flush=True)
+                    last_counts = {left.index: (left.frames, now_report),
+                                   right.index: (right.frames, now_report)}
+                    last_report = now_report
             elif not args.no_preview:
                 key = cv2.waitKey(1) & 255
                 if key in (27, ord('q'), ord('Q')):
