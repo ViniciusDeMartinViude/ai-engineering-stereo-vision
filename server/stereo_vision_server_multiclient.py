@@ -424,34 +424,54 @@ def desktop_dimensions():
         return 1920, 1080
 
 
-def make_local_preview(frame, width, height, mode='fit', screen=None):
-    """Only modifies the server DISPLAY, never the outgoing UDP frame."""
+def make_local_preview(frame, width, height, mode='fit', screen=None,
+                       left_ns=None, right_ns=None):
+    """Readable local HUD with enlarged display-only copy of binary telemetry."""
     sw, sh = screen if screen else desktop_dimensions()
-    area_w, area_h = max(400, sw - 50), max(300, sh - 120)
-    # Keep the 100px telemetry footer (including the 168-bit CRC strip)
-    # visible in ALL preview modes. The original frame is never modified.
+    area_w = max(450, sw - 50)
+    area_h = max(320, sh - 120)
     if mode == 'left':
-        video = np.concatenate((frame[:height, :width, :],
-                                frame[height:, :width, :]), axis=0)
+        video = frame[:height, :width, :]
     elif mode == 'right':
-        # The binary strip occupies the LEFT side of the shared footer.
-        # Reuse that footer beneath the right camera rather than cropping it.
-        video = np.concatenate((frame[:height, width:, :],
-                                frame[height:, :width, :]), axis=0)
+        video = frame[:height, width:, :]
     else:
-        video = frame
-    factor = min(area_w / video.shape[1], (area_h - 76) / video.shape[0], 1.0)
-    size = (max(1, round(video.shape[1] * factor)),
-            max(1, round(video.shape[0] * factor)))
-    if size != (video.shape[1], video.shape[0]):
-        video = cv2.resize(video, size, interpolation=cv2.INTER_AREA)
-    h, w = video.shape[:2]
-    preview = np.zeros((h + 76, w, 3), dtype=np.uint8)
-    preview[:h, :w] = video
-    cv2.putText(preview, f'VIEW: {mode.upper()}  |  1: BOTH   2: LEFT   3: RIGHT',
-                (14, h + 29), cv2.FONT_HERSHEY_SIMPLEX, .76, (245, 245, 245), 2, cv2.LINE_AA)
-    cv2.putText(preview, 'F: fullscreen   S: save original   Q/Esc: quit',
-                (14, h + 59), cv2.FONT_HERSHEY_SIMPLEX, .68, (210, 230, 210), 2, cv2.LINE_AA)
+        video = frame[:height, :, :]
+    # Reserve space for LARGE text and the binary strip; never change UDP data.
+    footer_h = 172
+    factor = min(area_w / video.shape[1],
+                 max(120, area_h - footer_h) / video.shape[0], 1.0)
+    vw = max(1, round(video.shape[1] * factor))
+    vh = max(1, round(video.shape[0] * factor))
+    if (vw, vh) != (video.shape[1], video.shape[0]):
+        video = cv2.resize(video, (vw, vh), interpolation=cv2.INTER_AREA)
+    # Make the footer at least as wide as the large timestamp text.
+    display_w = max(vw, min(area_w, 1050))
+    preview = np.full((vh + footer_h, display_w, 3), (24, 24, 24), dtype=np.uint8)
+    preview[:vh, (display_w-vw)//2:(display_w-vw)//2+vw] = video
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    if left_ns is not None and right_ns is not None:
+        cv2.putText(preview, 'LEFT  ' + timestamp_text(left_ns),
+                    (14, vh+28), font, .68, (250,250,250), 2, cv2.LINE_AA)
+        cv2.putText(preview, 'RIGHT ' + timestamp_text(right_ns),
+                    (14, vh+57), font, .68, (250,250,250), 2, cv2.LINE_AA)
+    else:
+        cv2.putText(preview, 'LIVE STEREO TIMESTAMP', (14, vh+32), font,
+                    .78, (250,250,250), 2, cv2.LINE_AA)
+    cv2.putText(preview, 'BINARY TIMESTAMP + CRC16 (168 bits)', (14, vh+82),
+                font, .61, (190,235,250), 2, cv2.LINE_AA)
+    # Extract the original encoded strip and enlarge using NEAREST so black
+    # and white cells retain crisp edges. Never resize the data sent over UDP.
+    x0 = 12
+    bits_width = 168 * CELL_W
+    y0 = frame.shape[0] - CELL_H - 11
+    roi = frame[y0:y0+CELL_H, x0:x0+bits_width, :]
+    if roi.shape == (CELL_H, bits_width, 3):
+        bar_w = max(1, display_w-28)
+        barcode = cv2.resize(roi, (bar_w, 36), interpolation=cv2.INTER_NEAREST)
+        preview[vh+90:vh+126, 14:14+bar_w] = barcode
+    cv2.putText(preview, f'{mode.upper()}   1: BOTH  2: LEFT  3: RIGHT   '
+                'F: FULLSCREEN  S: SAVE  Q: QUIT', (14, vh+153),
+                font, .55, (215,215,215), 1, cv2.LINE_AA)
     return preview
 
 
@@ -599,7 +619,8 @@ def main():
                 publisher.send(frame)
                 if not args.no_preview:
                     # Preview controls never change original encoded video / CRC footer.
-                    preview = make_local_preview(frame, args.width, args.height, preview_mode)
+                    preview = make_local_preview(frame, args.width, args.height, preview_mode,
+                                                 left_ns=l.captured_ns, right_ns=r.captured_ns)
                     cv2.imshow(window_title, preview)
                     if not preview_initialized:
                         preview_initialized = True
