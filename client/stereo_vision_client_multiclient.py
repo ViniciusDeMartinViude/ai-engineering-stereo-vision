@@ -153,7 +153,7 @@ class StreamReceiver:
         else:
             source = f'udpsrc address=0.0.0.0 port={port} buffer-size=4194304 '
         pipeline_str = (
-            source
+            source +
             'caps="video/mpegts,systemstream=(boolean)true,packetsize=(int)188" '
             '! tsparse set-timestamps=true '
             '! tsdemux name=demux '
