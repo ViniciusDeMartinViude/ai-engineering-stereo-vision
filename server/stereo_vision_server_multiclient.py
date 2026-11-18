@@ -8,7 +8,6 @@ Optional NVIDIA NVENC MPEG-TS UDP multi-client unicast publisher (no MediaMTX re
 Timestamp = host time at appsink delivery; NOT hardware exposure time.
 To launch:
   conda activate gst-stereo
-  python stereo_vision_server_v1.py
   python stereo_vision_server_multiclient.py --clients 192.168.1.248,192.168.1.249
   python stereo_vision_server_multiclient.py --clients-file clients.txt
 
@@ -62,29 +61,57 @@ class Snapshot:
 
 
 class Camera:
+    """DirectShow capture with independent per-camera capture-mode fallback.
+
+    The outgoing stream size and fps remain unchanged. Only capture input modes
+    vary, and videoscale/convert normalize the successful mode to server output.
+    """
     def __init__(self, index: int, width: int, height: int, fps: int, fmt: str):
         self.index = index
         self.width, self.height, self.fps = width, height, fps
         self.lock = threading.Lock()
         self.latest = None
         self.frames = 0
-        if fmt == "mjpeg":
-            source = (f'dshowvideosrc device-index={index} do-timestamp=true ! '
-                      f'image/jpeg,width={width},height={height},framerate={fps}/1 ! '
-                      'jpegdec ! videoconvert ! ')
-        else:
-            source = (f'dshowvideosrc device-index={index} do-timestamp=true ! '
-                      f'video/x-raw,format=YUY2,width={width},height={height},framerate={fps}/1 ! '
-                      'videoconvert ! ')
-        description = (source +
-                       f'video/x-raw,format=BGR,width={width},height={height} ! '
-                       'appsink name=grab emit-signals=true sync=false max-buffers=1 drop=true')
+        self.last_frame = 0.0
+        self.pipeline = None
+        self.sink = None
+        self.active_mode = None
+        self.preferred_format = fmt
+        self.modes = self._build_modes(fmt)
+
+    def _build_modes(self, preferred):
+        # Exact requested mode first, then standard webcam rates, then a mode
+        # without an explicit FPS restriction. Try YUY2 if MJPEG does not work.
+        sizes = [(self.width, self.height), (1280, 720), (640, 480)]
+        sizes = list(dict.fromkeys(sizes))
+        formats = [preferred, 'yuy2' if preferred == 'mjpeg' else 'mjpeg']
+        rates = list(dict.fromkeys([self.fps, 30, 15, 10, None]))
+        modes = []
+        for w, h in sizes:
+            for fmt in formats:
+                for rate in rates:
+                    modes.append((fmt, w, h, rate))
+        return modes
+
+    def _make_pipeline(self, mode):
+        fmt, w, h, rate = mode
+        caps = ('image/jpeg' if fmt == 'mjpeg' else 'video/x-raw,format=YUY2')
+        caps += f',width={w},height={h}'
+        if rate is not None:
+            caps += f',framerate={rate}/1'
+        decode = 'jpegdec ! ' if fmt == 'mjpeg' else ''
+        description = (
+            f'dshowvideosrc device-index={self.index} do-timestamp=true ! '
+            f'{caps} ! {decode}videoconvert ! videoscale ! '
+            f'video/x-raw,format=BGR,width={self.width},height={self.height} ! '
+            'appsink name=grab emit-signals=true sync=false max-buffers=1 drop=true'
+        )
         self.pipeline = Gst.parse_launch(description)
-        self.sink = self.pipeline.get_by_name("grab")
-        self.sink.connect("new-sample", self._on_frame)
+        self.sink = self.pipeline.get_by_name('grab')
+        self.sink.connect('new-sample', self._on_frame)
 
     def _on_frame(self, sink):
-        sample = sink.emit("pull-sample")
+        sample = sink.emit('pull-sample')
         if sample is None:
             return Gst.FlowReturn.ERROR
         buffer = sample.get_buffer()
@@ -92,43 +119,90 @@ class Camera:
         if not ok:
             return Gst.FlowReturn.ERROR
         try:
-            # Caps negotiation fixes BGR format at the requested dimensions.
-            # Gst buffers may have padded row strides; VideoMeta provides it if present.
-            meta = buffer.get_video_meta() if hasattr(buffer, "get_video_meta") else None
+            meta = buffer.get_video_meta() if hasattr(buffer, 'get_video_meta') else None
             stride = meta.stride[0] if meta else self.width * 3
             count = self.height * stride
             raw = np.frombuffer(mapped.data, dtype=np.uint8, count=count).reshape(self.height, stride)
             frame = raw[:, :self.width * 3].reshape(self.height, self.width, 3).copy()
-            stamped_ns = time.time_ns()  # software arrival timestamp, close to receiving the buffer
+            stamped_ns = time.time_ns()
         except Exception as exc:
-            print(f"Camera {self.index}: buffer error: {exc}", file=sys.stderr)
+            print(f'Camera {self.index}: buffer error: {exc}', file=sys.stderr)
             return Gst.FlowReturn.ERROR
         finally:
             buffer.unmap(mapped)
         with self.lock:
             self.frames += 1
             self.latest = Snapshot(frame, stamped_ns, self.frames)
+            self.last_frame = time.monotonic()
         return Gst.FlowReturn.OK
 
     def read_latest(self):
         with self.lock:
             return self.latest
 
-    def start(self):
-        result = self.pipeline.set_state(Gst.State.PLAYING)
-        if result == Gst.StateChangeReturn.FAILURE:
-            raise RuntimeError(f"Camera {self.index}: could not enter PLAYING")
-
-    def stop(self):
-        self.pipeline.set_state(Gst.State.NULL)
-
     def error(self):
-        bus = self.pipeline.get_bus()
-        message = bus.pop_filtered(Gst.MessageType.ERROR)
+        if self.pipeline is None:
+            return None
+        message = self.pipeline.get_bus().pop_filtered(Gst.MessageType.ERROR)
         if message:
             err, debug = message.parse_error()
-            return f"Camera {self.index}: {err} ({debug})"
+            return f'Camera {self.index}: {err} ({debug})'
         return None
+
+    def stop(self):
+        if self.pipeline is not None:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+        self.sink = None
+        with self.lock:
+            self.latest = None
+            self.last_frame = 0.0
+
+    def start(self, retry_favorite=False):
+        favorite = self.active_mode if retry_favorite else None
+        attempts = [favorite] + self.modes if favorite else self.modes
+        attempts = list(dict.fromkeys(attempts))
+        previous = None
+        for mode in attempts:
+            self.stop()
+            fmt, w, h, rate = mode
+            label = f'{fmt.upper()} {w}x{h} at {rate if rate is not None else "auto"} FPS'
+            print(f'Camera {self.index}: trying {label}', flush=True)
+            try:
+                self._make_pipeline(mode)
+                result = self.pipeline.set_state(Gst.State.PLAYING)
+                if result == Gst.StateChangeReturn.FAILURE:
+                    previous = 'pipeline could not enter PLAYING'
+                    continue
+                # PLAYING can succeed even if DirectShow immediately rejects
+                # its caps; confirm a real decoded frame is delivered.
+                deadline = time.monotonic() + 1.8
+                while time.monotonic() < deadline:
+                    failure = self.error()
+                    if failure:
+                        previous = failure
+                        break
+                    if self.read_latest() is not None:
+                        self.active_mode = mode
+                        print(f'Camera {self.index}: selected {label} -> output '
+                              f'{self.width}x{self.height}', flush=True)
+                        return
+                    time.sleep(0.05)
+                else:
+                    previous = 'no frames delivered within 1.8 seconds'
+            except Exception as exc:
+                previous = str(exc)
+                print(f'Camera {self.index}: mode failed: {previous}', flush=True)
+        self.stop()
+        raise RuntimeError(
+            f'Camera {self.index}: no compatible capture mode among {len(attempts)} attempts. '
+            f'Last issue: {previous}. Close other camera apps, reconnect USB and '
+            'check actual supported modes with FFmpeg -list_options true.'
+        )
+
+    def stalled(self, timeout=5.0):
+        with self.lock:
+            return bool(self.last_frame) and time.monotonic() - self.last_frame > timeout
 
 
 def parse_clients(entries, port):
@@ -319,6 +393,7 @@ def main():
         period_ns = int(1e9 / args.fps)
         target_ns = time.monotonic_ns()
         last_report = time.monotonic()
+        retry_after = {left.index: 0.0, right.index: 0.0}
         while True:
             if args.clients_file and time.monotonic() >= next_reload:
                 next_reload = time.monotonic() + 2.0
@@ -332,11 +407,23 @@ def main():
                         print('Ignoring empty client list; keeping prior recipients', flush=True)
                 except (ValueError, OSError) as exc:
                     print('Ignoring invalid clients-file update:', exc, flush=True)
-            for component in (left, right, publisher):
-                if component:
-                    err = component.error()
-                    if err:
-                        raise RuntimeError(err)
+            for camera in (left, right):
+                err = camera.error()
+                if camera.stalled():
+                    err = err or f'Camera {camera.index}: no frames for 5 seconds'
+                if camera.pipeline is None and time.monotonic() >= retry_after[camera.index]:
+                    err = err or f'Camera {camera.index}: disconnected; retrying'
+                if err and time.monotonic() >= retry_after[camera.index]:
+                    print(f'{err}\nAttempting automatic camera recovery...', flush=True)
+                    try:
+                        camera.start(retry_favorite=True)
+                        print(f'Camera {camera.index}: recovery succeeded', flush=True)
+                    except RuntimeError as exc:
+                        print(f'Camera {camera.index}: {exc}', flush=True)
+                        retry_after[camera.index] = time.monotonic() + 8.0
+            publisher_error = publisher.error()
+            if publisher_error:
+                raise RuntimeError(publisher_error)
             l, r = left.read_latest(), right.read_latest()
             if l is not None and r is not None:
                 frame_number += 1
