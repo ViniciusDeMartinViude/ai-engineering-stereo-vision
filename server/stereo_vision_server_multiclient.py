@@ -282,7 +282,8 @@ def read_clients_file(path, default_port):
 
 class UdpPublisher:
     """Single NVENC encoder, one MPEG-TS muxer, unicast fan-out at UDP sink."""
-    def __init__(self, width: int, height: int, fps: int, destinations, bitrate=3000):
+    def __init__(self, width: int, height: int, fps: int, destinations, bitrate=3000,
+                 multicast=False, multicast_iface=None):
         description = (
             f'appsrc name=source is-live=true format=time block=false do-timestamp=false '
             f'caps="video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1" ! '
@@ -299,6 +300,12 @@ class UdpPublisher:
         self.fanout = self.pipeline.get_by_name('fanout')
         if self.fanout is None:
             raise RuntimeError('multiudpsink not available: install gst-plugins-good in gst-stereo')
+        if multicast:
+            self.fanout.set_property('auto-multicast', True)
+            self.fanout.set_property('ttl-mc', 1)  # local subnet only
+            self.fanout.set_property('loop', True)
+            if multicast_iface:
+                self.fanout.set_property('multicast-iface', multicast_iface)
         self.set_destinations(destinations)
         self.duration = Gst.SECOND // fps
         self.seq = 0
@@ -437,6 +444,12 @@ def main():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--format", choices=["mjpeg", "yuy2"], default="mjpeg")
+    parser.add_argument("--transport", choices=["multicast", "unicast"], default="multicast",
+                        help="Default multicast uses one shared stream; unicast uses clients.txt")
+    parser.add_argument("--multicast-group", default="239.10.10.10",
+                        help="IPv4 multicast address (default 239.10.10.10)")
+    parser.add_argument("--multicast-iface", default=None,
+                        help="Optional GStreamer interface name for multicast output")
     parser.add_argument("--client-ip", help="Legacy single receiver IP (can combine with --clients)")
     parser.add_argument("--clients", default='', help="Comma-separated unicast IPv4 IPs, optionally IP:port")
     parser.add_argument("--clients-file", help="Text file: one IP or IP:port per line; reloaded every 2 seconds")
@@ -452,27 +465,42 @@ def main():
         parser.error("Combined video too narrow for the binary stripe; use width >= 516")
     if not 1 <= args.port <= 65535 or args.bitrate < 100:
         parser.error('Invalid --port or --bitrate')
-    cli_entries = args.clients.split(',') if args.clients else []
-    if args.client_ip:
-        cli_entries.append(args.client_ip)
-    try:
-        fixed_clients = parse_clients(cli_entries, args.port)
-        file_clients = read_clients_file(args.clients_file, args.port) if args.clients_file else []
-        destinations = list(dict.fromkeys(fixed_clients + file_clients))
-    except (ValueError, OSError) as exc:
-        parser.error(str(exc))
-    if not destinations:
-        parser.error('Specify --clients, --clients-file, or --client-ip')
+    if args.transport == 'multicast':
+        try:
+            group = ipaddress.IPv4Address(args.multicast_group)
+            if not group.is_multicast:
+                parser.error('--multicast-group must be an IPv4 multicast address')
+        except ipaddress.AddressValueError as exc:
+            parser.error(str(exc))
+        if args.clients_file or args.clients or args.client_ip:
+            print('Multicast mode: ignoring unicast client list. Use --transport unicast to enable it.',
+                  flush=True)
+        fixed_clients = []
+        destinations = [(str(group), args.port)]
+    else:
+        cli_entries = args.clients.split(',') if args.clients else []
+        if args.client_ip:
+            cli_entries.append(args.client_ip)
+        try:
+            fixed_clients = parse_clients(cli_entries, args.port)
+            file_clients = read_clients_file(args.clients_file, args.port) if args.clients_file else []
+            destinations = list(dict.fromkeys(fixed_clients + file_clients))
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        if not destinations:
+            parser.error('Unicast mode requires --clients, --clients-file, or --client-ip')
     left = Camera(args.left, args.width, args.height, args.fps, args.format)
     right = Camera(args.right, args.width, args.height, args.fps, args.format)
     publisher = UdpPublisher(args.width * 2, args.height + FOOTER_H, args.fps,
-                             destinations, args.bitrate)
+                             destinations, args.bitrate,
+                             multicast=args.transport == 'multicast',
+                             multicast_iface=args.multicast_iface)
     next_reload = time.monotonic() + 2.0
     print("Starting cameras...", flush=True)
     try:
         negotiate_stereo_pair(left, right)
         publisher.start()
-        print('UDP MPEG-TS NVENC fan-out:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
+        print('UDP '+args.transport.upper()+' MPEG-TS NVENC destination:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
         print('168-bit binary timestamp + CRC16 unchanged from working UDP v1', flush=True)
         print("Preview: 1 both, 2 left, 3 right, F fullscreen, S screenshot, Q/Esc quit.")
         preview_mode = args.preview_mode
@@ -489,7 +517,7 @@ def main():
         last_counts = {left.index: (left.frames, time.monotonic()),
                        right.index: (right.frames, time.monotonic())}
         while True:
-            if args.clients_file and time.monotonic() >= next_reload:
+            if args.transport == 'unicast' and args.clients_file and time.monotonic() >= next_reload:
                 next_reload = time.monotonic() + 2.0
                 try:
                     fresh = read_clients_file(args.clients_file, args.port)
