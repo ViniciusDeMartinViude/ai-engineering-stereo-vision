@@ -266,7 +266,7 @@ class CameraPanel(QtWidgets.QFrame):
         label = f'{w} × {h}   {fps:.1f} recv FPS'
         if age_ms is not None:
             label += f'   {age_ms:.0f} ms age'
-        if self.hud.toPlainText() != label:
+        if self.hud.textItem.toPlainText() != label:
             self.hud.setText(label)
 
     def set_detections(self, detections):
@@ -529,7 +529,7 @@ class Studio(QtWidgets.QMainWindow):
         try:
             self.reader.check_error()
         except RuntimeError as exc:
-            self.stream_status.setText(f'STREAM ERROR: {exc}')
+            self.stream_chip.display('bad', f'STREAM ERROR: {exc}')
             self.timer.stop()
             return
         frame, recv_ns, frame_id = self.reader.latest()
@@ -567,12 +567,7 @@ class Studio(QtWidgets.QMainWindow):
             now = time.monotonic()
             filtered_skew_ms = self.skew_smoother.update(
                 stamp.right_minus_left_us / 1000.0, now)
-            # Updating the large digits only four times per second reduces
-            # flicker while the filter runs on every valid decoded frame.
-            if now - self.last_instrument_update >= 0.25:
-                self.average_delay.set_milliseconds(statistics.mean(self.age_samples))
-                self.camera_skew.set_milliseconds(filtered_skew_ms)
-                self.last_instrument_update = now
+            # Dashboard widgets update from the 10 Hz presentation timer.
             if self.last_seq is not None:
                 delta = (stamp.sequence-self.last_seq)%(1<<32)
                 if 1 < delta < 10000:
