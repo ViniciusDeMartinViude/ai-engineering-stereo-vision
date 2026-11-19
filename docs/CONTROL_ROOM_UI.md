@@ -1,0 +1,85 @@
+# Control-room UI branch — Python 3.12
+
+This is the **experimental** control-room redesign, kept separate from the working `main` branch. Do not merge until it passes the hardware tests below.
+
+## Run on the Windows receiver
+
+```powershell
+cd C:\Users\vviud\aiesnc27\ai-engineering-stereo-vision
+git fetch origin
+git switch feature/control-room-ui
+git pull --ff-only origin feature/control-room-ui
+conda activate gst-stereo-qt312
+python --version
+python client/stereo_vision_client_qt.py --self-test
+```
+
+Python must report **3.12.x**. The self-test checks ROI selection controls, seven-segment formatting, skew EMA, the dynamic ms/s axis, and core dashboard widgets **without networking**.
+
+To use the same RTSP-free multicast stream you already have:
+
+```powershell
+python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11 --time-server 192.168.0.10 --yolo-model yolo26n.pt --yolo-device 0
+```
+
+Replace 192.168.0.11 with the receiver's Ethernet IP if it changed. Stop other UDP port 5000 clients before launching. Keep your existing camera server running; this branch does not change it.
+
+## Visible changes
+
+- Stream, clock, and YOLO state chips with text/icons (waiting/live/stale/error)
+- Segmented view selector (keyboard 1/2/3), a help button (F fullscreen, Esc maximized)
+- Two PyQtGraph camera panels with receiving FPS, size, delay HUDs, and stale/no-signal overlays
+- Reused YOLO rectangle/label graphics, and the original independent ROI controls
+- Compact aligned telemetry grouped as valid/error counts, timestamps, last delay/skew, and clock
+- CRC barcode moved into an expandable Diagnostics pane (stays collapsed unless explicitly opened)
+- Unified KPI cards: average delay (last 100 valid frames), p95 & jitter, skew EMA (1.5-second time constant) plus last raw skew
+- Framed graph with Delay/Skew toggle, selectable 100/500/2000-frame window, pause, mean/target lines and crosshair inspection
+- Original seven-segment LEDs with dim inactive segments, more legible minus sign, and no trailing decimal on integer readings
+- All core theme colors, type sizes, card QSS and provisional thresholds centralized in `client/theme.py`
+- Chart values remain raw milliseconds; dynamic tick units still switch between ms and s
+- Text and charts refresh at 10 Hz while decoded video refreshes when frames arrive
+
+## Ground-truth semantics and caveats
+
+- FPS in the HUD is **received/decoded stereo frame rate**, not independently measured physical sensor FPS.
+- Average delay and p95 use the **last up to 100 valid decoded frames**. The configurable graph may show a longer sample window.
+- Display skew is an exponential moving average; last skew remains unfiltered.
+- The yellow reference line uses **provisional** thresholds in `theme.py`. They are not validated performance requirements. Do not infer hardware pass/fail from them without setting your competition targets.
+- Clock quality is based on whether sync completed and its raw RTT, not on a known absolute synchronization guarantee.
+- Original GStreamer receiver, multicast packet data, timestamp/CRC decoder, SNTP estimation, and YOLO worker are **unchanged**.
+- The existing image path still converts the incoming BGR arrays to RGB for PyQtGraph. Avoid assuming this redesign adds zero GUI overhead without measuring it.
+- This code has not been run on the user's Windows system; live UI/screen-size behavior still requires validation.
+
+## Test checklist
+
+1. Run `--self-test`; if it fails, capture the entire traceback.
+2. With the real server, compare 60 seconds of latency and CRC counters against `main` on the **same LAN and workload**.
+3. Confirm both cameras appear, fullscreen / 1 / 2 / 3 work, ROI still controls the correct YOLO crop.
+4. Unplug/reconnect the network temporarily and observe the stream STALE / NO SIGNAL overlay, then recovery.
+5. Toggle Diagnostics to view the original binary strip; check that CRC errors visibly flag it.
+6. Verify average and p95 units, signed instantaneous vs smoothed skew, and graph Delay/Skew, Pause, sample-window selector and hover.
+7. Check 1920×1080, 1366×768 and 125%/150% Windows scaling; capture screenshots if labels overlap.
+8. Monitor Task Manager or `nvidia-smi` while YOLO runs. If delay consistently increases vs main, record both averages and receiver FPS.
+9. Switch back to the known-good application with `git switch main` (ensure no uncommitted local changes).
+
+## Changelog / audit alignment
+
+| Reported issue | Redesign change |
+|---|---|
+| Unclear overall health | Textual Stream/Clock/YOLO chips |
+| Excess video margins | Compact header/ROI chrome; preserved aspect ratio |
+| Barcode wastes space | Expandable Diagnostics |
+| Footer clipping | Native compact status bar + help |
+| Chart lacks card | Matching framed chart |
+| Ghost LEDs / decimal / minus | Low-opacity inactive segments, integer-point fix, wider minus |
+| Dense telemetry | Aligned labeled groups |
+| Confusing delay/skew values | Explicit last / average / EMA windows |
+| No FPS/freshness | Received FPS HUD + stale overlay |
+| No latency distribution | p95, min/max, jitter |
+| Clock sync buried | Dedicated chip and offset/RTT telemetry |
+| YOLO status hidden | Dedicated status chip and inference time |
+| Chart jump/overlap | Stable envelope, no legend, mean and provisional target |
+| Weak view selection | Exclusive segmented control |
+| Too many per-frame updates | 10 Hz status/chart timer, reused YOLO items |
+
+Not yet implemented: independently measured **hardware camera FPS**, machine-specific threshold calibration, or removing the original RGB array conversions. Those require additional validated instrumentation or performance testing.
