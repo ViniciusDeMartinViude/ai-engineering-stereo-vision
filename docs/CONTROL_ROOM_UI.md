@@ -83,3 +83,11 @@ Replace 192.168.0.11 with the receiver's Ethernet IP if it changed. Stop other U
 | Too many per-frame updates | 10 Hz status/chart timer, reused YOLO items |
 
 Not yet implemented: independently measured **hardware camera FPS**, machine-specific threshold calibration, or removing the original RGB array conversions. Those require additional validated instrumentation or performance testing.
+
+## Camera-first layout adjustment
+
+The camera splitter now receives the flexible vertical space while the bottom KPI/chart row is limited to a compact 110–145 pixel strip. On a typical maximized 1920×1080 display, the target is **approximately two-thirds of the available window height for the cameras**. Actual visible image height still depends on screen scale, window chrome and the incoming image aspect ratio; video remains uncropped and undistorted. The telemetry and diagnostics areas remain compact.
+
+**All three KPI cards** (average delay, P95 delay and smoothed skew) now use three-significant-digit seven-segment readouts. P95 remains the 95th percentile of the most recent up to 100 valid frame ages; the jitter (standard deviation of consecutive delay differences) remains visible in its card's secondary line. No timestamp, latency, skew or decoding calculations were changed.
+
+After updating the branch, verify that all three LED readouts show, the video area is taller, and no controls overlap at the target resolution. If 1366×768 clips the bottom strip, report the screen scaling and screenshot.
