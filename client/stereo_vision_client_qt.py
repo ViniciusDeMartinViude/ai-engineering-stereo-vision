@@ -141,7 +141,11 @@ class CameraPanel(QtWidgets.QFrame):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(3)
-        hdr = QtWidgets.QHBoxLayout()
+        header_card = QtWidgets.QFrame()
+        header_card.setObjectName('cameraHeader')
+        hdr = QtWidgets.QHBoxLayout(header_card)
+        hdr.setContentsMargins(8, 3, 6, 3)
+        hdr.setSpacing(7)
         self.title = QtWidgets.QLabel(f'{side} CAMERA')
         self.title.setObjectName('cameraTitle')
         self.detect_count = QtWidgets.QLabel('○ 0 detected')
@@ -157,7 +161,7 @@ class CameraPanel(QtWidgets.QFrame):
             f'Expand {side.lower()} camera · shortcut {2 if side == "LEFT" else 3}')
         self.view_toggle.clicked.connect(self._toggle_view)
         hdr.addWidget(self.view_toggle)
-        layout.addLayout(hdr)
+        layout.addWidget(header_card)
 
         self.graphics = pg.GraphicsLayoutWidget()
         self.vbox = DrawViewBox()
@@ -387,6 +391,7 @@ class Studio(QtWidgets.QMainWindow):
         main.addLayout(header)
 
         self.cameras = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.cameras.setHandleWidth(9)  # Slightly more breathing room between feeds
         self.left_panel = CameraPanel('LEFT', COLORS['accent'])
         self.right_panel = CameraPanel('RIGHT', COLORS['accent'])
         self.left_panel.roi_changed.connect(self._roi_changed)
@@ -423,7 +428,8 @@ class Studio(QtWidgets.QMainWindow):
         main.addLayout(bottom, stretch=0)
 
         self.setCentralWidget(root)
-        self.statusBar().showMessage('1 Both  ·  2 Left  ·  3 Right  ·  F Fullscreen  ·  Esc Windowed')
+        # No persistent bottom footer: shortcut hints remain in control tooltips.
+        self.statusBar().hide()
         for key, mode in [('1','both'),('2','left'),('3','right')]:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(lambda v=mode: self.change_view(v))
@@ -450,7 +456,7 @@ class Studio(QtWidgets.QMainWindow):
     def _roi_changed(self, side, bounds):
         if self.yolo:
             self.yolo.set_roi(side, bounds)
-        self.statusBar().showMessage(f'{side} ROI: {fmt_roi(bounds)}', 5000)
+        # ROI coordinates are already shown directly in the camera control strip.
 
     def _refresh_metrics(self):
         """10 Hz status/KPI cadence; raw image path remains frame-driven."""
