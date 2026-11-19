@@ -4,21 +4,81 @@
 
 This is a second client UI, not a replacement for the proven Tkinter client. The camera server, original Tkinter client, GStreamer multicast relay, 168-bit CRC16 timestamp protocol, LAN SNTP, and local YOLO worker are still available and unchanged.
 
-## Setup (Windows / Conda)
+## Setup (Windows / Conda) — recommended Python 3.12
+
+**Do not downgrade the existing working \`gst-stereo\` environment in place.**
+The older environment may have PySide6/Qt DLLs installed through several package
+managers. Create a completely new environment from this branch instead.
+
+### A. Update the feature branch
 
 \`\`\`powershell
 git fetch origin
 git switch feature/pyside6-pyqtgraph-client
-conda activate gst-stereo
-python -m pip install PySide6 pyqtgraph
+git pull --ff-only origin feature/pyside6-pyqtgraph-client
+\`\`\`
+
+### B. Create the Python 3.12 environment
+
+You can create it from the reproducible YAML file:
+
+\`\`\`powershell
+conda env create -f environment-qt312.yml
+conda activate gst-stereo-qt312
+\`\`\`
+
+If you **already have** an incomplete environment with that exact name,
+delete only that experimental environment (never delete \`gst-stereo\`):
+
+\`\`\`powershell
+conda deactivate
+conda env remove -n gst-stereo-qt312
+conda env create -f environment-qt312.yml
+conda activate gst-stereo-qt312
+\`\`\`
+
+The YAML installs Python 3.12, GStreamer, PyGObject, PySide6, PyQtGraph,
+OpenCV, NumPy and Pillow from **conda-forge** in one solver transaction.
+Do not run a separate \`pip install PySide6\` on top of this environment.
+
+### C. Check Python and binary imports
+
+\`\`\`powershell
+python --version
+where.exe python
+python -c "from PySide6 import QtCore, QtWidgets; import pyqtgraph; print('Qt:', QtCore.qVersion())"
+python -c "import gi; gi.require_version('Gst','1.0'); from gi.repository import Gst; Gst.init(None); print('GStreamer OK')"
+gst-inspect-1.0 udpsrc
+gst-inspect-1.0 tsdemux
+gst-inspect-1.0 avdec_h264
 python client/stereo_vision_client_qt.py --self-test
 \`\`\`
 
-Optional YOLO inference:
+The Python version should be \`3.12.x\`. The Qt and GStreamer import checks
+should pass *before* starting multicast.
+
+### D. Optional YOLO installation — only after the basic Qt client works
 
 \`\`\`powershell
 python -m pip install ultralytics
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 \`\`\`
+
+Ultralytics may install or update PyTorch or OpenCV dependencies. If Qt/DLL
+imports break after installing Ultralytics, create another fresh environment
+and check the package changes before proceeding. \`--yolo-device cpu\` is a
+valid initial fallback when CUDA is not ready.
+
+### Diagnosing Qt DLL import failures
+
+The error \`ImportError: DLL load failed while importing QtCore: The specified
+procedure could not be found\` is **not proof** that Python 3.15 is the sole
+cause. Check the active Python version and installed packages. If it persists
+in the clean Python 3.12 environment, inspect \`conda list\`, \`where.exe
+python\`, \`where.exe qmake\`, and Windows \`PATH\` / Qt-related environment
+variables for foreign Qt DLLs.
+
+Do not mix pip PySide6 wheels with Conda's Qt libraries in the same environment.
 
 Start the app on the tested Windows receiver at \`192.168.0.11\` (change to the **local Ethernet IPv4** of each student PC):
 
