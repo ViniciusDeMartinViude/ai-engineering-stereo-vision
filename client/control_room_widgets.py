@@ -120,7 +120,7 @@ class TelemetryBar(QtWidgets.QFrame):
             if i in (1,3,5):
                 sep = QtWidgets.QFrame()
                 sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-                sep.setStyleSheet(f'color:{COLORS["border"]};')
+                sep.setProperty('separator', True)
                 row.addWidget(sep)
 
     def update_fields(self, **values):
@@ -149,7 +149,7 @@ class KpiCard(QtWidgets.QFrame):
             layout.addWidget(label)
             self.label = QtWidgets.QLabel('—')
             self.label.setObjectName('metricValue')
-            self.label.setStyleSheet('font-size:23px;')
+            self.label.setProperty('largeNumber', True)
             layout.addWidget(self.label, 1)
         self.secondary = QtWidgets.QLabel(subtitle)
         self.secondary.setObjectName('secondary')
@@ -285,6 +285,7 @@ class LatencyChart(QtWidgets.QFrame):
         self._display_count = 0
         self._last_mean = 0.0
         self.plot.getViewBox().sigYRangeChanged.connect(self._axis_changed)
+        self.set_mode('delay')
 
     def _axis_changed(self, *args):
         if self.mode == 'delay':
@@ -309,6 +310,7 @@ class LatencyChart(QtWidgets.QFrame):
         self._display_count = 0
         self.axis.enableAutoSIPrefix(False)
         if mode == 'delay':
+            self.axis.setLabel('Delay (ms)',color=COLORS['text'],size='11pt')
             self.axis.update_for_range(0, self.high_envelope)
             self.target_line.setValue(THRESHOLDS.delay_good_below_ms)
         else:
