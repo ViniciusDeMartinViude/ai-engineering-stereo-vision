@@ -150,6 +150,12 @@ The bottom telemetry is arranged **left to right**: rolling-average-delay seven-
 
 The **skew display** applies a time-based exponential moving average with a **1.5-second time constant**, and the two large instruments redraw their digits at most **four times per second**. The smoother uses valid CRC frames only; the first valid sample initializes it immediately. The signed raw skew measurement, binary timestamps and NTP offset are **not** filtered or altered. The rolling delay average still covers up to 300 valid frames.
 
-The **graph** continues to show unsmoothed NTP-corrected frame-age samples, but plots **seconds** (the millisecond samples divided by 1000) and uses the explicit Y-axis label **Delay (s)** with readable tick labels. PyQtGraph SI-prefix auto-scaling is disabled to avoid misleading `kms` / kilo-millisecond units.
+The **graph** continues to show unsmoothed NTP-corrected frame-age samples stored and plotted in **milliseconds**. The custom Y axis automatically switches its visible tick labels and title between **Delay (ms)** and **Delay (s)** according to the current visible range (at about 1000 ms). Zooming updates the unit. PyQtGraph SI-prefix auto-scaling is disabled to avoid misleading `kms` labels.
 
 Run `python client/stereo_vision_client_qt.py --self-test` to check ROI, seven-segment formatting and skew filtering after updating `main`.
+
+## Dynamic latency graph units
+
+The frame-age graph uses a custom `DelayAxis` in `client/stereo_vision_client_qt.py`. Measurement and plotting stay in raw milliseconds, with only the **displayed tick values** converted to seconds when the visible Y-axis range reaches approximately 1000 ms. The axis title changes between `Delay (ms)` and `Delay (s)`; the plot legend remains `Frame delay`, independent of units. The update follows the current visible Y range, including manual zoom. No SI prefixes are applied to the Y axis. The seven-segment displays and skew smoothing are unchanged.
+
+Run `python client/stereo_vision_client_qt.py --self-test` after `git pull origin main` to check both display-unit cases.
