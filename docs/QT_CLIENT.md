@@ -1,21 +1,21 @@
 # AI Stereo Vision Studio — PySide6 + PyQtGraph
 
-**Experimental UI branch:** `feature/pyside6-pyqtgraph-client`
+**Official client on `main`. Required Python version: 3.12.x (Windows).**
 
-This is a second client UI, not a replacement for the proven Tkinter client. The camera server, original Tkinter client, GStreamer multicast relay, 168-bit CRC16 timestamp protocol, LAN SNTP, and local YOLO worker are still available and unchanged.
+This is the recommended desktop UI. The original Tkinter client is retained as a fallback. The camera server, original Tkinter client, GStreamer multicast relay, 168-bit CRC16 timestamp protocol, LAN SNTP, and local YOLO worker are still available and unchanged.
 
-## Setup (Windows / Conda) — recommended Python 3.12
+## Setup (Windows / Conda) — required Python 3.12
 
-**Do not downgrade the existing working `gst-stereo` environment in place.**
+**Use Python 3.12.x for the Qt client. Do not downgrade the existing working `gst-stereo` environment in place.**
 The older environment may have PySide6/Qt DLLs installed through several package
 managers. Create a completely new environment from this branch instead.
 
-### A. Update the feature branch
+### A. Update main
 
 ```powershell
 git fetch origin
-git switch feature/pyside6-pyqtgraph-client
-git pull --ff-only origin feature/pyside6-pyqtgraph-client
+git switch main
+git pull --ff-only origin main
 ```
 
 ### B. Create the Python 3.12 environment
@@ -71,12 +71,9 @@ valid initial fallback when CUDA is not ready.
 
 ### Diagnosing Qt DLL import failures
 
-The error `ImportError: DLL load failed while importing QtCore: The specified
-procedure could not be found` is **not proof** that Python 3.15 is the sole
-cause. Check the active Python version and installed packages. If it persists
-in the clean Python 3.12 environment, inspect `conda list`, `where.exe
-python`, `where.exe qmake`, and Windows `PATH` / Qt-related environment
-variables for foreign Qt DLLs.
+If `QtCore` fails with a DLL import error even in the clean Python 3.12
+environment, inspect `conda list`, `where.exe python`, `where.exe qmake`,
+and Windows `PATH` / Qt-related environment variables for foreign Qt DLLs.
 
 Do not mix pip PySide6 wheels with Conda's Qt libraries in the same environment.
 
@@ -115,15 +112,14 @@ ROIs are in **original camera pixels**, not pixels on the Windows screen. They a
 
 ## Known limitations
 
-- This is the first Qt implementation and requires **live validation on the actual Windows/Conda computer**; the GitHub code was not executed on the physical setup.
+- This Qt implementation and requires **live validation on the actual Windows/Conda computer**; the GitHub code was not executed on the physical setup.
 - Current ROIs are session-only; no saved calibration/ROI configuration yet.
 - Side-by-side camera capture still has independent sensor exposures; no hardware camera synchronization.
 - Depth/disparity and stereo calibration are not yet implemented.
 - Qt plugin conflicts can occur if a Conda/Python environment also contains OpenCV packages with bundled Qt plugins. Diagnose Qt platform plugin errors separately before modifying the working GStreamer stack.
 
-To switch back to the established version:
+To run the retained Tkinter fallback (also available on `main`):
 
 ```powershell
-git switch main
 python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11
 ```
