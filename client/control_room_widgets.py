@@ -212,7 +212,7 @@ class DiagnosticsPanel(QtWidgets.QFrame):
         self.toggle.setText(('▾' if checked else '▸') + ' Diagnostics')
 
     def update_counts(self, valid, invalid, lost):
-        summary = f'CRC {valid}  ·  Invalid {invalid}  ·  Lost {lost}'
+        summary = ('▲ ' if invalid or lost else '') + f'CRC {valid}  ·  Invalid {invalid}  ·  Lost {lost}'
         if self.crc_summary.text() != summary:
             self.crc_summary.setText(summary)
 
