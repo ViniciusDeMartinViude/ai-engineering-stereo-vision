@@ -44,7 +44,7 @@ def format_three_digits(milliseconds):
         digits = f'{rounded:03d}'
         # For 0.125, exponent=-1 -> decimal before first digit.
         decimal_position = exponent + 1
-        return digits, decimal_position, sign, unit
+        return digits, (None if decimal_position == 3 else decimal_position), sign, unit
     return '999', 3, sign, unit
 
 
@@ -104,7 +104,7 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         # Fixed slot layout: sign, three 43px digits, units.
         if self.sign:
             p.setBrush(active)
-            p.drawRoundedRect(QtCore.QRectF(2, 42, 13, 5), 2, 2)
+            p.drawRoundedRect(QtCore.QRectF(1, 39, 17, 6), 2, 2)
         for i, char in enumerate(self.digits):
             self._draw_digit(p, 20 + i*44, 4, char, active, inactive)
         if self.decimal is not None and 0 <= self.decimal <= 3:
