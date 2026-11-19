@@ -129,7 +129,7 @@ python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11
 Two large, custom-rendered, anti-aliased **seven-segment** instruments are displayed alongside the latency plot. The original 168-bit binary timestamp / CRC16 strip and plot are both retained:
 
 - **AVERAGE DELAY** (green) is the arithmetic mean of the most recent **up to 300 valid, NTP-corrected left-camera frame ages**, displayed as a rolling average.
-- **CAMERA SKEW R-L** (amber) is the latest frame's signed right-camera-minus-left-camera timestamp difference. A positive sign means the right camera timestamp is later. This is **not** an average.
+- **CAMERA SKEW R-L** (amber) is a time-smoothed signed right-camera-minus-left-camera timestamp difference. A positive sign means the right camera timestamp is later. This is an exponential moving average (1.5-second time constant), not the rolling arithmetic average used for delay.
 - Both instruments render **three significant digits** with a moving decimal point: e.g. `1.23 ms`, `12.3 ms`, `123 ms`, `.125 ms`. Values below `0.1 ms` switch to `µs`; values of about `1000 ms` and above switch to `s`. Negative skew shows a minus sign.
 - Invalid-CRC frames do not update the readings. Before the first valid frame each instrument displays dashes.
 - This is a client display-only improvement; timestamp extraction, multicast, YOLO and ROI selection are unchanged.
@@ -143,3 +143,13 @@ conda activate gst-stereo-qt312
 python client/stereo_vision_client_qt.py --self-test
 python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11 --time-server 192.168.0.10
 ```
+
+## Smoother skew display and graph in seconds
+
+The bottom telemetry is arranged **left to right**: rolling-average-delay seven-segment display, signed camera-skew seven-segment display, and the latency trend graph. The enlarged 168-bit binary timestamp/CRC16 strip remains above them.
+
+The **skew display** applies a time-based exponential moving average with a **1.5-second time constant**, and the two large instruments redraw their digits at most **four times per second**. The smoother uses valid CRC frames only; the first valid sample initializes it immediately. The signed raw skew measurement, binary timestamps and NTP offset are **not** filtered or altered. The rolling delay average still covers up to 300 valid frames.
+
+The **graph** continues to show unsmoothed NTP-corrected frame-age samples, but plots **seconds** (the millisecond samples divided by 1000) and uses the explicit Y-axis label **Delay (s)** with readable tick labels. PyQtGraph SI-prefix auto-scaling is disabled to avoid misleading `kms` / kilo-millisecond units.
+
+Run `python client/stereo_vision_client_qt.py --self-test` to check ROI, seven-segment formatting and skew filtering after updating `main`.
