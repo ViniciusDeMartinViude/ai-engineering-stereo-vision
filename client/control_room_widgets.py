@@ -137,12 +137,12 @@ class KpiCard(QtWidgets.QFrame):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6,3,6,3)
         layout.setSpacing(1)
-        self.setMinimumHeight(110)
-        self.setMaximumHeight(145)
+        self.setMinimumHeight(148)
+        self.setMaximumHeight(192)
         if led_color:
             self.readout = SevenSegmentDisplay(title, led_color)
-            self.readout.setMinimumSize(150,84)
-            self.readout.setMaximumHeight(105)
+            self.readout.setMinimumSize(165,112)
+            self.readout.setMaximumHeight(151)
             layout.addWidget(self.readout, 1)
             self.label = None
         else:
@@ -169,51 +169,67 @@ class KpiCard(QtWidgets.QFrame):
 
 
 class DiagnosticsPanel(QtWidgets.QFrame):
-    """Collapsible source barcode, always retained for CRC troubleshooting."""
+    """Compact collapsed diagnostics; includes full telemetry and binary barcode."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName('controlCard')
         main = QtWidgets.QVBoxLayout(self)
-        main.setContentsMargins(8,5,8,5)
-        main.setSpacing(3)
-        self.toggle = QtWidgets.QPushButton('▸ Diagnostics: 168-bit UTC timestamp + CRC16')
+        main.setContentsMargins(6, 3, 6, 3)
+        main.setSpacing(2)
+        head = QtWidgets.QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
+        self.toggle = QtWidgets.QPushButton('▸ Diagnostics')
         self.toggle.setCheckable(True)
-        self.toggle.setToolTip('Toggle the original embedded barcode (not modified)')
+        self.toggle.setToolTip('Show CRC counts, timestamps, clock measurements and original barcode')
         self.toggle.toggled.connect(self._expand)
-        main.addWidget(self.toggle)
+        head.addWidget(self.toggle)
+        self.crc_summary = QtWidgets.QLabel('CRC —  ·  Invalid —  ·  Lost —')
+        self.crc_summary.setObjectName('minor')
+        head.addWidget(self.crc_summary)
+        head.addStretch()
+        main.addLayout(head)
         self.contents = QtWidgets.QWidget()
         inner = QtWidgets.QVBoxLayout(self.contents)
-        inner.setContentsMargins(0,0,0,0)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(3)
+        self.telemetry = TelemetryBar()
+        inner.addWidget(self.telemetry)
         self.barcode = QtWidgets.QLabel('Waiting for timestamp data')
         self.barcode.setFixedHeight(30)
         self.barcode.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft |
                                   QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.note = QtWidgets.QLabel('Original 168-bit source pixels; no recoding')
+        self.note = QtWidgets.QLabel('168-bit UTC timestamp + CRC16 · Original source pixels')
         self.note.setObjectName('minor')
         inner.addWidget(self.barcode)
         inner.addWidget(self.note)
         main.addWidget(self.contents)
         self.contents.hide()
+        self.crc_error = False
 
     def _expand(self, checked: bool):
         self.contents.setVisible(checked)
-        self.toggle.setText(('▾' if checked else '▸') +
-                            ' Diagnostics: 168-bit UTC timestamp + CRC16')
+        self.toggle.setText(('▾' if checked else '▸') + ' Diagnostics')
+
+    def update_counts(self, valid, invalid, lost):
+        summary = f'CRC {valid}  ·  Invalid {invalid}  ·  Lost {lost}'
+        if self.crc_summary.text() != summary:
+            self.crc_summary.setText(summary)
 
     def flag_crc_error(self):
-        self.toggle.setText('▲ Diagnostics: CRC error — expand to inspect')
-        self.toggle.setToolTip('Invalid barcode/CRC detected')
+        self.crc_error = True
+        self.crc_summary.setText('▲ CRC ERROR · inspect Diagnostics')
+        self.toggle.setToolTip('CRC error detected — expand to inspect the source barcode')
 
     def update_barcode(self, frame):
         if not self.contents.isVisible():
             return
         y = frame.shape[0] - 27
         bars = frame[y:y+16, 12:12+168*6, ::-1]
-        if bars.shape != (16,1008,3):
+        if bars.shape != (16, 1008, 3):
             return
-        # Barcode: only one contiguous image copy when panel is expanded.
         arr = np.ascontiguousarray(bars)
-        image = QtGui.QImage(arr.data, 1008,16,1008*3,
+        image = QtGui.QImage(arr.data, 1008, 16, 1008*3,
                              QtGui.QImage.Format.Format_RGB888).copy()
         target = min(1008, max(100, self.barcode.width()-10))
         self.barcode.setPixmap(QtGui.QPixmap.fromImage(image).scaled(
@@ -233,8 +249,8 @@ class LatencyChart(QtWidgets.QFrame):
         main = QtWidgets.QVBoxLayout(self)
         main.setContentsMargins(6,3,6,3)
         main.setSpacing(2)
-        self.setMinimumHeight(110)
-        self.setMaximumHeight(145)
+        self.setMinimumHeight(148)
+        self.setMaximumHeight(192)
         header = QtWidgets.QHBoxLayout()
         self.title = QtWidgets.QLabel('LATENCY HISTORY')
         self.title.setObjectName('sectionTitle')
@@ -261,7 +277,7 @@ class LatencyChart(QtWidgets.QFrame):
 
         self.axis = axis_cls('left')
         self.plot = pg.PlotWidget(axisItems={'left':self.axis})
-        self.plot.setMinimumHeight(62)
+        self.plot.setMinimumHeight(91)
         self.plot.getAxis('left').setWidth(70)
         self.plot.getAxis('left').setTickFont(QtGui.QFont(FONT_UI, 10))
         self.plot.setLabel('bottom', 'Frames ago', color=COLORS['secondary'])
