@@ -2,13 +2,19 @@
 
 The current baseline uses **two Logitech MX Brio cameras**, **GStreamer**, **NVIDIA NVENC H.264**, **MPEG-TS over UDP multicast**, and the original **168-bit visual timestamp with CRC-16**.
 
+## Supported Python version
+
+**Python 3.12.x is the required version for the merged Qt client and the recommended Windows development environment.** Use `environment-qt312.yml` to provision PySide6, PyQtGraph, GStreamer and their dependencies together from conda-forge. Keep any legacy working environment intact; do not change Python in-place.
+
 ## Server dependencies
 
 In PowerShell:
 
 ```powershell
-conda create -n gst-stereo -c conda-forge python=3.11 gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav pygobject pycairo numpy opencv -y
-conda activate gst-stereo
+conda env create -f environment-qt312.yml
+conda activate gst-stereo-qt312
+python --version  # must show Python 3.12.x
+conda activate gst-stereo-qt312
 gst-inspect-1.0 dshowvideosrc
 gst-inspect-1.0 nvh264enc
 gst-inspect-1.0 multiudpsink
@@ -36,7 +42,9 @@ Useful options: `--fps 10 --width 640 --height 480 --format mjpeg --bitrate 3000
 
 ## Client dependencies and startup
 
-Install the same Conda environment (NVENC not required on student computers):
+**Recommended client:** `python client/stereo_vision_client_qt.py --iface-ip YOUR_RECEIVER_IPV4 --time-server SERVER_IPV4` under `gst-stereo-qt312`. Run `python client/stereo_vision_client_qt.py --self-test` first; see [Qt Client Guide](QT_CLIENT.md). The following Tkinter commands are retained as fallback examples.
+
+Use the same Python 3.12 Conda environment (NVENC not required on student computers):
 
 ```powershell
 conda activate gst-stereo
