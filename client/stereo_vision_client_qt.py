@@ -24,6 +24,7 @@ from stereo_vision_client_multiclient import StreamReceiver, decode_strip, iso_u
 from yolo_detector import YoloWorker
 from lan_ntp import measure_ntp_offset
 from seven_segment import SevenSegmentDisplay, format_three_digits
+from timing_filter import ExponentialSmoother
 
 # pyqtgraph uses [row, column, channel] throughout this client.
 pg.setConfigOptions(imageAxisOrder='row-major', antialias=True, background='#111925',
@@ -231,6 +232,10 @@ class Studio(QtWidgets.QMainWindow):
         self.valid = self.invalid = self.missing = 0
         self.last_seq = None
         self.age_samples = collections.deque(maxlen=300)
+        # The raw, signed R-L skew remains unchanged in stats/logs.
+        # The instrument uses a 1.5-second time-based EMA and updates at 4 Hz.
+        self.skew_smoother = ExponentialSmoother(time_constant_seconds=1.5)
+        self.last_instrument_update = 0.0
         self.timestamps = collections.deque(maxlen=300)
         self.clock_offset = args.clock_offset_ms
         self.clock_status = 'not measured'
@@ -315,20 +320,27 @@ class Studio(QtWidgets.QMainWindow):
         self.chart = pg.PlotWidget()
         self.chart.setMinimumHeight(120)
         self.chart.setMaximumHeight(180)
-        self.chart.setLabel('left', 'Frame age', units='ms')
-        self.chart.setLabel('bottom', 'Recent decoded frames')
-        self.chart.showGrid(x=True, y=True, alpha=0.15)
+        # Plot seconds explicitly so SI scaling cannot produce "kms".
+        self.chart.setTitle('ONE-WAY FRAME AGE', color='#d6e8fa', size='12pt')
+        self.chart.setLabel('left', 'Delay (s)', color='#eaf4ff', size='12pt')
+        self.chart.setLabel('bottom', 'Recent decoded frames', color='#b6c8dc', size='10pt')
+        y_axis = self.chart.getAxis('left')
+        y_axis.enableAutoSIPrefix(False)
+        y_axis.setWidth(76)
+        y_axis.setStyle(tickTextOffset=12)
+        y_axis.setTickFont(QtGui.QFont('Segoe UI', 11))
+        self.chart.showGrid(x=True, y=True, alpha=0.2)
         self.chart.addLegend(offset=(10, 10))
-        self.age_curve = self.chart.plot(pen=pg.mkPen('#ffd56d', width=2),
-                                         name='Corrected frame age (ms)')
-        # Retain the original graph and binary strip; add two clear instruments.
+        self.age_curve = self.chart.plot(pen=pg.mkPen('#ffd56d', width=2.5),
+                                         name='Frame delay (s)')
+        # Instruments on the LEFT; graph on the RIGHT; binary stays above.
         bottom = QtWidgets.QHBoxLayout()
         bottom.setSpacing(9)
-        bottom.addWidget(self.chart, stretch=4)
         self.average_delay = SevenSegmentDisplay('AVERAGE DELAY', '#63edba')
-        self.camera_skew = SevenSegmentDisplay('CAMERA SKEW  R-L', '#ffcb74')
+        self.camera_skew = SevenSegmentDisplay('CAMERA SKEW  R-L (SMOOTHED)', '#ffcb74')
         bottom.addWidget(self.average_delay, stretch=2)
         bottom.addWidget(self.camera_skew, stretch=2)
+        bottom.addWidget(self.chart, stretch=5)
         main.addLayout(bottom, stretch=0)
         self.setCentralWidget(root)
         self.statusBar().showMessage('1 Both  ·  2 Left  ·  3 Right  ·  F Fullscreen  ·  Esc Windowed')
@@ -409,8 +421,15 @@ class Studio(QtWidgets.QMainWindow):
             self.valid += 1
             age = recv_ns / 1e6 - stamp.left_utc_ms - self.clock_offset
             self.age_samples.append(age)
-            self.average_delay.set_milliseconds(statistics.mean(self.age_samples))
-            self.camera_skew.set_milliseconds(stamp.right_minus_left_us / 1000.0)
+            now = time.monotonic()
+            filtered_skew_ms = self.skew_smoother.update(
+                stamp.right_minus_left_us / 1000.0, now)
+            # Updating the large digits only four times per second reduces
+            # flicker while the filter runs on every valid decoded frame.
+            if now - self.last_instrument_update >= 0.25:
+                self.average_delay.set_milliseconds(statistics.mean(self.age_samples))
+                self.camera_skew.set_milliseconds(filtered_skew_ms)
+                self.last_instrument_update = now
             if self.last_seq is not None:
                 delta = (stamp.sequence-self.last_seq)%(1<<32)
                 if 1 < delta < 10000:
@@ -425,7 +444,7 @@ class Studio(QtWidgets.QMainWindow):
                 f'    •    Skew {stamp.right_minus_left_us/1000:+.1f} ms'
                 f'    •    {self.clock_status}')
             self.age_curve.setData(np.arange(len(self.age_samples)),
-                                   np.array(self.age_samples))
+                                   np.array(self.age_samples, dtype=float) / 1000.0)
         else:
             self.invalid += 1
             self.stats.setText(f'Invalid embedded timestamp: {err}  |  CRC OK {self.valid}')
@@ -501,7 +520,12 @@ def main():
         instrument = SevenSegmentDisplay('AVERAGE DELAY')
         instrument.set_milliseconds(12.34)
         assert instrument.digits == '123' and instrument.decimal == 2
-        print('PASS: Qt image, ROI and seven-segment timing instruments')
+        smoother = ExponentialSmoother(time_constant_seconds=1.5)
+        assert smoother.update(0.0, 0.0) == 0.0
+        midway = smoother.update(10.0, 1.5)
+        assert 6.0 < midway < 6.5, midway
+        assert smoother.update(10.0, 1.5) == midway
+        print('PASS: Qt image, ROI, seven-segment instruments, and skew smoothing')
         return 0
     studio = Studio(args)
     studio.showMaximized()
