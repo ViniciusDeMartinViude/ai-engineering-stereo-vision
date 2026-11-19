@@ -23,6 +23,7 @@ import pyqtgraph as pg
 from stereo_vision_client_multiclient import StreamReceiver, decode_strip, iso_utc
 from yolo_detector import YoloWorker
 from lan_ntp import measure_ntp_offset
+from seven_segment import SevenSegmentDisplay, format_three_digits
 
 # pyqtgraph uses [row, column, channel] throughout this client.
 pg.setConfigOptions(imageAxisOrder='row-major', antialias=True, background='#111925',
@@ -248,6 +249,8 @@ class Studio(QtWidgets.QMainWindow):
                                 font-family:'Segoe UI'; font-size:13px; }
           QFrame#cameraPanel { background:#182434; border:1px solid #324254;
                                border-radius:10px; }
+          QFrame#sevenSegmentInstrument { background:#101c29; border:1px solid #3a536b;
+                                         border-radius:10px; }
           QLabel#cameraTitle { color:#92cbff; font-weight:700; font-size:15px; }
           QLabel#minor { color:#9bb0c6; font-size:11px; }
           QPushButton { background:#283a51; color:#edf6ff; border:1px solid #4e6987;
@@ -311,14 +314,22 @@ class Studio(QtWidgets.QMainWindow):
 
         self.chart = pg.PlotWidget()
         self.chart.setMinimumHeight(120)
-        self.chart.setMaximumHeight(170)
+        self.chart.setMaximumHeight(180)
         self.chart.setLabel('left', 'Frame age', units='ms')
         self.chart.setLabel('bottom', 'Recent decoded frames')
         self.chart.showGrid(x=True, y=True, alpha=0.15)
         self.chart.addLegend(offset=(10, 10))
         self.age_curve = self.chart.plot(pen=pg.mkPen('#ffd56d', width=2),
                                          name='Corrected frame age (ms)')
-        main.addWidget(self.chart, stretch=1)
+        # Retain the original graph and binary strip; add two clear instruments.
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.setSpacing(9)
+        bottom.addWidget(self.chart, stretch=4)
+        self.average_delay = SevenSegmentDisplay('AVERAGE DELAY', '#63edba')
+        self.camera_skew = SevenSegmentDisplay('CAMERA SKEW  R-L', '#ffcb74')
+        bottom.addWidget(self.average_delay, stretch=2)
+        bottom.addWidget(self.camera_skew, stretch=2)
+        main.addLayout(bottom, stretch=0)
         self.setCentralWidget(root)
         self.statusBar().showMessage('1 Both  ·  2 Left  ·  3 Right  ·  F Fullscreen  ·  Esc Windowed')
 
@@ -398,6 +409,8 @@ class Studio(QtWidgets.QMainWindow):
             self.valid += 1
             age = recv_ns / 1e6 - stamp.left_utc_ms - self.clock_offset
             self.age_samples.append(age)
+            self.average_delay.set_milliseconds(statistics.mean(self.age_samples))
+            self.camera_skew.set_milliseconds(stamp.right_minus_left_us / 1000.0)
             if self.last_seq is not None:
                 delta = (stamp.sequence-self.last_seq)%(1<<32)
                 if 1 < delta < 10000:
@@ -480,7 +493,15 @@ def main():
         assert panel.bounds == (30, 40, 250, 300)
         panel.clear_roi()
         assert panel.bounds is None
-        print('PASS: PySide6 + PyQtGraph image and ROI controls')
+        # Three-digit rendering: decimals and units automatically scale.
+        for value, expected in [(12.34, ('123', 2, '', 'ms')),
+                                (0.125, ('125', 0, '', 'ms')),
+                                (1234, ('123', 1, '', 's'))]:
+            assert format_three_digits(value) == expected, (value, format_three_digits(value))
+        instrument = SevenSegmentDisplay('AVERAGE DELAY')
+        instrument.set_milliseconds(12.34)
+        assert instrument.digits == '123' and instrument.decimal == 2
+        print('PASS: Qt image, ROI and seven-segment timing instruments')
         return 0
     studio = Studio(args)
     studio.showMaximized()
