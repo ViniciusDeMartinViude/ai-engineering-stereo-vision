@@ -25,6 +25,11 @@ from yolo_detector import YoloWorker
 from lan_ntp import measure_ntp_offset
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
+from theme import COLORS, THRESHOLDS, style_sheet, quality
+from control_room_widgets import (
+    StatusChip, SegmentedControl, TelemetryBar, KpiCard,
+    DiagnosticsPanel, LatencyChart,
+)
 
 # pyqtgraph uses [row, column, channel] throughout this client.
 pg.setConfigOptions(imageAxisOrder='row-major', antialias=True, background='#111925',
@@ -150,6 +155,21 @@ class CameraPanel(QtWidgets.QFrame):
         self.image_item = pg.ImageItem(axisOrder='row-major')
         self.vbox.addItem(self.image_item)
         self.box_items = []
+        self.box_labels = []
+        self.hud = pg.TextItem('WAITING FOR VIDEO', color=COLORS['text'],
+                               fill=pg.mkBrush(10, 20, 31, 190))
+        self.hud.setZValue(70)
+        self.vbox.addItem(self.hud, ignoreBounds=True)
+        self.stale_cover = QtWidgets.QGraphicsRectItem()
+        self.stale_cover.setBrush(pg.mkBrush(0, 0, 0, 170))
+        self.stale_cover.setPen(QtCore.Qt.PenStyle.NoPen)
+        self.stale_cover.setZValue(80)
+        self.vbox.addItem(self.stale_cover, ignoreBounds=True)
+        self.stale_cover.hide()
+        self.stale_text = pg.TextItem('NO SIGNAL', color=COLORS['bad'], anchor=(0.5,0.5))
+        self.stale_text.setZValue(81)
+        self.vbox.addItem(self.stale_text, ignoreBounds=True)
+        self.stale_text.hide()
         self.vbox.selected.connect(self._new_selection)
         layout.addWidget(self.graphics, stretch=1)
 
@@ -170,6 +190,9 @@ class CameraPanel(QtWidgets.QFrame):
         self.native_shape = (w, h)
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         self.image_item.setImage(rgb, autoLevels=False)
+        self.stale_cover.setRect(0, 0, w, h)
+        self.stale_text.setPos(w/2, h/2)
+        self.hud.setPos(12, 12)
         if not self._has_image:
             self._has_image = True
             self.vbox.setRange(xRange=(0, w), yRange=(0, h), padding=0.01)
@@ -231,27 +254,47 @@ class CameraPanel(QtWidgets.QFrame):
         self.info.setText(fmt_roi(self.bounds))
         self.roi_changed.emit(self.side, self.bounds)
 
+    def set_stale(self, age_s):
+        stale = age_s is None or age_s >= THRESHOLDS.stale_after_s
+        self.stale_cover.setVisible(stale and self._has_image)
+        self.stale_text.setVisible(stale)
+        if stale:
+            self.stale_text.setText('NO SIGNAL' if age_s is None else f'STALE · {age_s:.1f} s')
+
+    def set_hud(self, fps, age_ms):
+        w, h = self.native_shape
+        label = f'{w} × {h}   {fps:.1f} recv FPS'
+        if age_ms is not None:
+            label += f'   {age_ms:.0f} ms age'
+        if self.hud.toPlainText() != label:
+            self.hud.setText(label)
+
     def set_detections(self, detections):
-        for item in self.box_items:
-            self.vbox.removeItem(item)
-        self.box_items = []
-        count = 0
-        for det in detections:
-            if det.side != self.side:
-                continue
-            count += 1
-            x1, y1, x2, y2 = det.xyxy
-            rect = QtWidgets.QGraphicsRectItem(x1, y1, max(1, x2-x1), max(1, y2-y1))
-            rect.setPen(pg.mkPen(self.color, width=3))
+        selected = [d for d in detections if d.side == self.side]
+        while len(self.box_items) < len(selected):
+            rect = QtWidgets.QGraphicsRectItem()
+            rect.setPen(pg.mkPen(COLORS['accent'], width=3))
+            rect.setZValue(21)
             self.vbox.addItem(rect, ignoreBounds=True)
             self.box_items.append(rect)
-            lbl = pg.TextItem(f'{det.label} {det.confidence:.0%}',
-                              color='#101820', fill=pg.mkBrush(self.color),
-                              border=pg.mkPen(self.color))
-            lbl.setPos(x1, max(0, y1-8))
-            self.vbox.addItem(lbl, ignoreBounds=True)
-            self.box_items.append(lbl)
-        self.detect_count.setText(f'{count} detections')
+            label = pg.TextItem('', color=COLORS['background'],
+                                fill=pg.mkBrush(COLORS['accent']))
+            label.setZValue(22)
+            self.vbox.addItem(label, ignoreBounds=True)
+            self.box_labels.append(label)
+        for i, rect in enumerate(self.box_items):
+            visible = i < len(selected)
+            rect.setVisible(visible)
+            self.box_labels[i].setVisible(visible)
+            if visible:
+                d = selected[i]
+                x1,y1,x2,y2 = d.xyxy
+                rect.setRect(x1,y1,max(1,x2-x1),max(1,y2-y1))
+                self.box_labels[i].setText(f'{d.label} {d.confidence:.0%}')
+                self.box_labels[i].setPos(x1,max(0,y1-8))
+        text = f'● {len(selected)} detected' if selected else '○ 0 detected'
+        if self.detect_count.text() != text:
+            self.detect_count.setText(text)
 
 
 class Studio(QtWidgets.QMainWindow):
@@ -264,7 +307,25 @@ class Studio(QtWidgets.QMainWindow):
         self.last_count = 0
         self.valid = self.invalid = self.missing = 0
         self.last_seq = None
-        self.age_samples = collections.deque(maxlen=300)
+        self.age_samples = collections.deque(maxlen=2000)
+        self.skew_samples = collections.deque(maxlen=2000)
+        self.frame_arrival_times = collections.deque(maxlen=100)
+        self.last_frame_monotonic = None
+        self.last_metrics_update = 0.0
+        self.last_chart_update = 0.0
+        self.last_recv_frame = None
+        self.last_stamp = None
+        self.last_age_ms = None
+        self.last_skew_ms = None
+        self.last_yolo_status = 'Disabled'
+        self.last_yolo_ms = None
+        self.sync_rtt = None
+        self.sync_sample_count = 0
+        self.last_error_count = 0
+        self.last_error_mono = 0.0
+        self.last_packet_count = 0
+        self.last_packet_mono = time.monotonic()
+        self.packet_rate = 0.0
         # The raw, signed R-L skew remains unchanged in stats/logs.
         # The instrument uses a 1.5-second time-based EMA and updates at 4 Hz.
         self.skew_smoother = ExponentialSmoother(time_constant_seconds=1.5)
@@ -277,117 +338,90 @@ class Studio(QtWidgets.QMainWindow):
         self._last_overlay_id = -1
         self._last_overlay_mono = 0
         self.setWindowTitle('AI Stereo Vision Studio  |  PySide6 + PyQtGraph')
-        self.setMinimumSize(960, 650)
+        self.setMinimumSize(960, 640)
         self._build()
         self._start_services()
 
     def _build(self):
-        self.setStyleSheet("""
-          QMainWindow, QWidget { background:#101723; color:#e7f0fa;
-                                font-family:'Segoe UI'; font-size:13px; }
-          QFrame#cameraPanel { background:#182434; border:1px solid #324254;
-                               border-radius:10px; }
-          QFrame#sevenSegmentInstrument { background:#101c29; border:1px solid #3a536b;
-                                         border-radius:10px; }
-          QLabel#cameraTitle { color:#92cbff; font-weight:700; font-size:15px; }
-          QLabel#minor { color:#9bb0c6; font-size:11px; }
-          QPushButton { background:#283a51; color:#edf6ff; border:1px solid #4e6987;
-                        padding:7px 12px; border-radius:6px; }
-          QPushButton:hover { background:#345779; }
-          QLabel#status { color:#b0f1cb; font-weight:600; }
-        """)
+        self.setStyleSheet(style_sheet())
         root = QtWidgets.QWidget()
         main = QtWidgets.QVBoxLayout(root)
-        main.setContentsMargins(12, 10, 12, 10)
-        main.setSpacing(8)
+        main.setContentsMargins(8, 6, 8, 6)
+        main.setSpacing(5)
+
         header = QtWidgets.QHBoxLayout()
-        brand = QtWidgets.QLabel('◉  AI STEREO VISION STUDIO')
-        brand.setStyleSheet('font-size:20px; font-weight:700; color:#eaf6ff;')
+        brand = QtWidgets.QLabel('◉ AI STEREO VISION STUDIO')
+        brand.setObjectName('appTitle')
         header.addWidget(brand)
         header.addStretch()
-        self.stream_status = QtWidgets.QLabel('CONNECTING')
-        self.stream_status.setObjectName('status')
-        header.addWidget(self.stream_status)
+        self.stream_chip = StatusChip('STREAM')
+        self.clock_chip = StatusChip('CLOCK')
+        self.yolo_chip = StatusChip('YOLO')
+        for chip in (self.stream_chip, self.clock_chip, self.yolo_chip):
+            header.addWidget(chip)
         main.addLayout(header)
 
         toolbar = QtWidgets.QHBoxLayout()
-        self.both_btn = QtWidgets.QPushButton('Both Cameras [1]')
-        self.left_btn = QtWidgets.QPushButton('Left [2]')
-        self.right_btn = QtWidgets.QPushButton('Right [3]')
-        for button, mode in ((self.both_btn,'both'),(self.left_btn,'left'),
-                             (self.right_btn,'right')):
-            button.clicked.connect(lambda checked=False, v=mode: self.change_view(v))
-            toolbar.addWidget(button)
-        self.yolo_text = QtWidgets.QLabel('YOLO disabled')
-        self.yolo_text.setObjectName('minor')
+        self.views = SegmentedControl()
+        self.views.selected.connect(self.change_view)
+        toolbar.addWidget(self.views)
         toolbar.addStretch()
-        toolbar.addWidget(self.yolo_text)
+        help_button = QtWidgets.QPushButton('?')
+        help_button.setFixedWidth(36)
+        help_button.setToolTip('Keyboard shortcuts and help')
+        help_button.clicked.connect(self._show_help)
+        toolbar.addWidget(help_button)
         main.addLayout(toolbar)
 
         self.cameras = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.left_panel = CameraPanel('LEFT', '#70e4a6')
-        self.right_panel = CameraPanel('RIGHT', '#ff9fc3')
+        self.left_panel = CameraPanel('LEFT', COLORS['accent'])
+        self.right_panel = CameraPanel('RIGHT', COLORS['accent'])
         self.left_panel.roi_changed.connect(self._roi_changed)
         self.right_panel.roi_changed.connect(self._roi_changed)
         self.cameras.addWidget(self.left_panel)
         self.cameras.addWidget(self.right_panel)
-        self.cameras.setSizes([700,700])
-        main.addWidget(self.cameras, stretch=7)
+        self.cameras.setSizes([700, 700])
+        main.addWidget(self.cameras, stretch=10)
 
-        telemetry = QtWidgets.QFrame()
-        telemetry.setObjectName('cameraPanel')
-        telemetry_layout = QtWidgets.QVBoxLayout(telemetry)
-        self.stats = QtWidgets.QLabel('Waiting for video / clock alignment...')
-        self.stats.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        telemetry_layout.addWidget(self.stats)
-        self.binary = QtWidgets.QLabel()
-        self.binary.setFixedHeight(31)
-        self.binary.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft |
-                                 QtCore.Qt.AlignmentFlag.AlignVCenter)
-        telemetry_layout.addWidget(self.binary)
-        self.bar_label = QtWidgets.QLabel('168-bit binary UTC timestamp + CRC16 (original source pixels)')
-        self.bar_label.setObjectName('minor')
-        telemetry_layout.addWidget(self.bar_label)
-        main.addWidget(telemetry, stretch=0)
+        self.telemetry = TelemetryBar()
+        main.addWidget(self.telemetry)
+        self.diagnostics = DiagnosticsPanel()
+        main.addWidget(self.diagnostics)
 
-        self.delay_axis = DelayAxis('left')
-        self.chart = pg.PlotWidget(axisItems={'left': self.delay_axis})
-        self.chart.setMinimumHeight(120)
-        self.chart.setMaximumHeight(180)
-        self.chart.setTitle('ONE-WAY FRAME AGE', color='#d6e8fa', size='12pt')
-        self.chart.setLabel('bottom', 'Recent decoded frames', color='#b6c8dc', size='10pt')
-        self.delay_axis.setWidth(76)
-        self.delay_axis.setStyle(tickTextOffset=12)
-        self.delay_axis.setTickFont(QtGui.QFont('Segoe UI', 11))
-        self.chart.showGrid(x=True, y=True, alpha=0.2)
-        self.chart.addLegend(offset=(10, 10))
-        self.age_curve = self.chart.plot(pen=pg.mkPen('#ffd56d', width=2.5),
-                                         name='Frame delay')
-        self.chart.getViewBox().sigYRangeChanged.connect(self._update_delay_axis)
-        # Instruments on the LEFT; graph on the RIGHT; binary stays above.
         bottom = QtWidgets.QHBoxLayout()
-        bottom.setSpacing(9)
-        self.average_delay = SevenSegmentDisplay('AVERAGE DELAY', '#63edba')
-        self.camera_skew = SevenSegmentDisplay('CAMERA SKEW  R-L (SMOOTHED)', '#ffcb74')
-        bottom.addWidget(self.average_delay, stretch=2)
-        bottom.addWidget(self.camera_skew, stretch=2)
-        bottom.addWidget(self.chart, stretch=5)
+        bottom.setSpacing(5)
+        self.average_delay_card = KpiCard('AVERAGE DELAY', 'Last 100 valid frames',
+                                          led_color=COLORS['accent'])
+        self.delay_p95_card = KpiCard('DELAY P95 / JITTER', 'Last 100 valid frames')
+        self.skew_card = KpiCard('CAMERA SKEW R−L', 'Smoothed · τ = 1.5 s',
+                                 led_color=COLORS['accent'])
+        bottom.addWidget(self.average_delay_card, 2)
+        bottom.addWidget(self.delay_p95_card, 2)
+        bottom.addWidget(self.skew_card, 2)
+        self.history = LatencyChart(DelayAxis)
+        bottom.addWidget(self.history, 5)
         main.addLayout(bottom, stretch=0)
+
         self.setCentralWidget(root)
         self.statusBar().showMessage('1 Both  ·  2 Left  ·  3 Right  ·  F Fullscreen  ·  Esc Windowed')
-
-        for key, mode in (('1','both'),('2','left'),('3','right')):
+        for key, mode in [('1','both'),('2','left'),('3','right')]:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
-            shortcut.activated.connect(lambda v=mode: self.change_view(v))
+            shortcut.activated.connect(lambda v=mode: self.views.select(v))
         shortcut = QtGui.QShortcut(QtGui.QKeySequence('F'), self)
         shortcut.activated.connect(self.toggle_fullscreen)
-        escape = QtGui.QShortcut(QtGui.QKeySequence('Escape'), self)
-        escape.activated.connect(self.showMaximized)
+        shortcut = QtGui.QShortcut(QtGui.QKeySequence('Escape'), self)
+        shortcut.activated.connect(self.showMaximized)
+        self.health_timer = QtCore.QTimer(self)
+        self.health_timer.timeout.connect(self._refresh_metrics)
+        self.health_timer.start(100)
 
-    def _update_delay_axis(self, *args):
-        """Follow the visible graph range, including zoom and autoscaling."""
-        low_ms, high_ms = self.chart.getViewBox().viewRange()[1]
-        self.delay_axis.update_for_range(low_ms, high_ms)
+    def _show_help(self):
+        QtWidgets.QMessageBox.information(
+            self, 'Stereo Vision keyboard shortcuts',
+            '1 · Both cameras\n2 · Left camera\n3 · Right camera\n'
+            'F · Fullscreen\nEsc · Maximized window\n\n'
+            'Use Select ROI then drag in the camera; Reset ROI restores full frame.\n'
+            'Diagnostics expands the original timestamp barcode.')
 
     def toggle_fullscreen(self):
         self.showMaximized() if self.isFullScreen() else self.showFullScreen()
@@ -402,13 +436,77 @@ class Studio(QtWidgets.QMainWindow):
             self.yolo.set_roi(side, bounds)
         self.statusBar().showMessage(f'{side} ROI: {fmt_roi(bounds)}', 5000)
 
+    def _refresh_metrics(self):
+        """10 Hz status/KPI cadence; raw image path remains frame-driven."""
+        now = time.monotonic()
+        stale_for = None if self.last_frame_monotonic is None else now-self.last_frame_monotonic
+        for panel in (self.left_panel, self.right_panel):
+            panel.set_stale(stale_for)
+        if stale_for is None:
+            self.stream_chip.display('neutral', 'WAITING')
+        elif stale_for >= THRESHOLDS.stream_disconnected_after_s:
+            self.stream_chip.display('bad', f'NO SIGNAL · {stale_for:.1f}s')
+        elif stale_for >= THRESHOLDS.stale_after_s:
+            self.stream_chip.display('warning', f'STALE · {stale_for:.1f}s')
+        else:
+            self.stream_chip.display('good', f'LIVE · {self.packet_rate:.0f} UDP/s')
+
+        if self.args.no_time_sync:
+            self.clock_chip.display('neutral','DISABLED')
+        elif self.sync_rtt is None:
+            self.clock_chip.display('warning','UNAVAILABLE')
+        else:
+            self.clock_chip.display('good', f'{self.clock_offset:+.1f} ms · RTT {self.sync_rtt:.2f} ms')
+        if not self.yolo:
+            self.yolo_chip.display('neutral', 'DISABLED')
+        else:
+            status = self.last_yolo_status
+            state = 'bad' if 'error' in status.lower() else (
+                'warning' if 'loading' in status.lower() else 'good')
+            suffix = f' · {self.last_yolo_ms:.0f} ms' if self.last_yolo_ms else ''
+            self.yolo_chip.display(state, status[:36] + suffix)
+
+        recv_fps = 0.0
+        if len(self.frame_arrival_times) > 1:
+            dt = self.frame_arrival_times[-1] - self.frame_arrival_times[0]
+            if dt > 0 and (stale_for is not None and stale_for < 1):
+                recv_fps = (len(self.frame_arrival_times)-1)/dt
+        for panel in (self.left_panel, self.right_panel):
+            if panel._has_image:
+                panel.set_hud(recv_fps, self.last_age_ms)
+        if self.last_stamp is not None:
+            st = self.last_stamp
+            self.telemetry.update_fields(
+                crc=f'{self.valid}', errors=f'{self.invalid} / {self.missing}',
+                left=iso_utc(st.left_utc_ms).replace(' UTC',''),
+                right=iso_utc(st.right_utc_ms).replace(' UTC',''),
+                age=f'{self.last_age_ms:.1f} ms',
+                skew=f'{self.last_skew_ms:+.2f} ms',
+                offset=f'{self.clock_offset:+.2f} ms',
+                rtt=f'{self.sync_rtt:.3f} ms' if self.sync_rtt is not None else 'Unavailable')
+        if self.age_samples:
+            values = np.asarray(list(self.age_samples)[-100:], dtype=float)
+            self.average_delay_card.set_value(float(np.mean(values)),
+                    secondary=f'Avg · last {len(values)} valid frames · {np.min(values):.0f}–{np.max(values):.0f} ms')
+            p95 = float(np.percentile(values, 95))
+            jitter = float(np.std(np.diff(values))) if len(values)>1 else 0.0
+            self.delay_p95_card.set_value(text=f'{p95:.1f} ms',
+                    secondary=f'Jitter (std Δ): {jitter:.1f} ms · {len(values)} frames')
+            self.skew_card.set_value(self.skew_smoother.value,
+                    secondary=f'EMA τ=1.5 s · last {self.last_skew_ms:+.2f} ms')
+            if now-self.last_chart_update >= 0.1:
+                self.history.update_samples(self.age_samples,self.skew_samples)
+                self.last_chart_update = now
+
     def _start_services(self):
         if not self.args.no_time_sync:
             try:
                 offset, rtt, samples = measure_ntp_offset(
                     self.args.time_server, self.args.ntp_port, self.args.ntp_samples)
                 self.clock_offset += offset
-                self.clock_status = f'Clock offset {offset:+.1f} ms; RTT {rtt:.1f} ms ({samples} samples)'
+                self.sync_rtt = rtt
+                self.sync_sample_count = samples
+                self.clock_status = f'Clock offset {offset:+.1f} ms; RTT {rtt:.2f} ms ({samples} samples)'
             except (OSError, TimeoutError, ValueError) as exc:
                 self.clock_status = f'Clock sync unavailable: {exc}'
         else:
@@ -438,6 +536,10 @@ class Studio(QtWidgets.QMainWindow):
         if frame is None or frame_id == self.last_count:
             return
         self.last_count = frame_id
+        now = time.monotonic()
+        self.last_frame_monotonic = now
+        self.frame_arrival_times.append(now)
+        self.last_recv_frame = frame
         source_h = max(1, frame.shape[0]-100)
         half = frame.shape[1]//2
         self.left_panel.set_image(frame[:source_h, :half])
@@ -445,7 +547,8 @@ class Studio(QtWidgets.QMainWindow):
         if self.yolo:
             self.yolo.submit(frame, frame_id)
             detections, status, result_id, result_mono, ms, error = self.yolo.snapshot()
-            self.yolo_text.setText(status[:110])
+            self.last_yolo_status = status
+            self.last_yolo_ms = ms
             if result_mono and time.monotonic()-result_mono < 1.0:
                 self.left_panel.set_detections(detections)
                 self.right_panel.set_detections(detections)
@@ -457,6 +560,10 @@ class Studio(QtWidgets.QMainWindow):
             self.valid += 1
             age = recv_ns / 1e6 - stamp.left_utc_ms - self.clock_offset
             self.age_samples.append(age)
+            self.skew_samples.append(stamp.right_minus_left_us/1000.0)
+            self.last_age_ms = age
+            self.last_skew_ms = stamp.right_minus_left_us/1000.0
+            self.last_stamp = stamp
             now = time.monotonic()
             filtered_skew_ms = self.skew_smoother.update(
                 stamp.right_minus_left_us / 1000.0, now)
@@ -472,36 +579,19 @@ class Studio(QtWidgets.QMainWindow):
                     self.missing += delta-1
             self.last_seq = stamp.sequence
             self.latest_stamp = stamp
-            self.stats.setText(
-                f'CRC OK {self.valid} | Invalid {self.invalid} | Skipped {self.missing}'
-                f'    •    LEFT {iso_utc(stamp.left_utc_ms)}'
-                f'    •    RIGHT {iso_utc(stamp.right_utc_ms)}'
-                f'    •    Age {age:.0f} ms'
-                f'    •    Skew {stamp.right_minus_left_us/1000:+.1f} ms'
-                f'    •    {self.clock_status}')
-            # Plot the original millisecond samples. DelayAxis formats
-            # the displayed Y values in ms or s without changing data.
-            self.age_curve.setData(np.arange(len(self.age_samples)),
-                                   np.array(self.age_samples, dtype=float))
-            self._update_delay_axis()
+            # Metrics/chart refresh independently at 10 Hz.
         else:
             self.invalid += 1
-            self.stats.setText(f'Invalid embedded timestamp: {err}  |  CRC OK {self.valid}')
-        y = frame.shape[0]-27
-        bars = frame[y:y+16, 12:12+168*6, ::-1]
-        if bars.shape == (16, 1008, 3):
-            # Copy to avoid lifetime / stride issues; scale only the UI.
-            arr = np.ascontiguousarray(bars)
-            qimage = QtGui.QImage(arr.data, 1008, 16, 1008*3,
-                                  QtGui.QImage.Format.Format_RGB888).copy()
-            pixmap = QtGui.QPixmap.fromImage(qimage).scaled(
-                min(max(1008, self.binary.width()-10), 1800), 28,
-                QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-                QtCore.Qt.TransformationMode.FastTransformation)
-            self.binary.setPixmap(pixmap)
-        self.stream_status.setText(
-            f'● MULTICAST  {self.reader.relay.packets if self.reader.relay else frame_id} UDP'
-        )
+            self.last_error_mono = time.monotonic()
+            self.diagnostics.flag_crc_error()
+        if self.diagnostics.contents.isVisible():
+            self.diagnostics.update_barcode(frame)
+        packet_count = self.reader.relay.packets if self.reader.relay else frame_id
+        elapsed = time.monotonic()-self.last_packet_mono
+        if elapsed >= 1.0:
+            self.packet_rate = (packet_count-self.last_packet_count)/elapsed
+            self.last_packet_count = packet_count
+            self.last_packet_mono = time.monotonic()
 
     def closeEvent(self, event):
         self._closing = True
@@ -569,7 +659,21 @@ def main():
         assert axis.unit == 'ms' and axis.tickStrings([250], 1, 50) == ['250']
         axis.update_for_range(0, 2400)
         assert axis.unit == 's' and axis.tickStrings([1500], 1, 100) == ['1.50']
-        print('PASS: Qt image, ROI, seven-segment instruments, skew smoothing, and dynamic ms/s chart')
+        chip = StatusChip('TEST')
+        chip.display('good','READY')
+        assert 'READY' in chip.text()
+        bar = TelemetryBar()
+        bar.update_fields(age='125 ms',crc='1')
+        assert bar.fields['age'].value.text() == '125 ms'
+        cards = KpiCard('AVERAGE DELAY', 'Last 100', led_color=COLORS['accent'])
+        cards.set_value(12.3)
+        assert cards.readout.digits == '123'
+        diagnostics = DiagnosticsPanel()
+        assert not diagnostics.contents.isVisible()
+        chart = LatencyChart(DelayAxis)
+        chart.update_samples([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
+        assert chart._display_count == 3
+        print('PASS: Qt control-room widgets, ROI, seven-segment, smoothing, and chart')
         return 0
     studio = Studio(args)
     studio.showMaximized()
