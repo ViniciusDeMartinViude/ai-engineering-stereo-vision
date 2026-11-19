@@ -135,11 +135,14 @@ class KpiCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName('instrumentCard')
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(8,6,8,6)
-        layout.setSpacing(2)
+        layout.setContentsMargins(6,3,6,3)
+        layout.setSpacing(1)
+        self.setMinimumHeight(110)
+        self.setMaximumHeight(145)
         if led_color:
             self.readout = SevenSegmentDisplay(title, led_color)
-            self.readout.setMinimumSize(180,110)
+            self.readout.setMinimumSize(150,84)
+            self.readout.setMaximumHeight(105)
             layout.addWidget(self.readout, 1)
             self.label = None
         else:
@@ -228,8 +231,10 @@ class LatencyChart(QtWidgets.QFrame):
         self.mode = 'delay'
         self.high_envelope = 500.0
         main = QtWidgets.QVBoxLayout(self)
-        main.setContentsMargins(8,6,8,6)
-        main.setSpacing(4)
+        main.setContentsMargins(6,3,6,3)
+        main.setSpacing(2)
+        self.setMinimumHeight(110)
+        self.setMaximumHeight(145)
         header = QtWidgets.QHBoxLayout()
         self.title = QtWidgets.QLabel('LATENCY HISTORY')
         self.title.setObjectName('sectionTitle')
@@ -256,7 +261,7 @@ class LatencyChart(QtWidgets.QFrame):
 
         self.axis = axis_cls('left')
         self.plot = pg.PlotWidget(axisItems={'left':self.axis})
-        self.plot.setMinimumHeight(95)
+        self.plot.setMinimumHeight(62)
         self.plot.getAxis('left').setWidth(70)
         self.plot.getAxis('left').setTickFont(QtGui.QFont(FONT_UI, 10))
         self.plot.setLabel('bottom', 'Frames ago', color=COLORS['secondary'])
