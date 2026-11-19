@@ -135,3 +135,21 @@ All Select ROI and Reset ROI buttons are removed. The camera image is interactiv
 The ROI rectangle is now a passive, non-movable graphic overlay rather than a draggable `pg.RectROI`; this prevents mouse gestures from conflicting with the requested controls. The ROI coordinate text stays in the camera header. The two camera panels have independent ROIs and independent zoom/pan view transforms. The existing streaming, timestamp, time sync, and YOLO inference implementations are unchanged.
 
 Test both camera views with and without YOLO, then select a new ROI while zoomed in and confirm the coordinates refer to the original source pixels. Double-click inside the image to clear the ROI; verify the view stays zoomed until manually zoomed out. Recheck the independent right-camera ROI separately.
+
+## Periodic LAN clock resynchronization (5 seconds)
+
+The Qt client now measures its client-minus-server clock offset **on startup and every 5 seconds** using the existing `common/lan_ntp.py` SNTP estimator (`--time-server`, `--ntp-port`, `--ntp-samples`). Measurements run in a single background executor, not on the GUI thread. If a measurement takes longer than the interval, it is not duplicated or queued.
+
+Every successful result **replaces**, rather than adds to, the prior correction: `effective_offset_ms = --clock-offset-ms + latest_ntp_offset_ms`. This is required to avoid manufactured clock drift. Video timestamps and the latency calculation continue to use their original formulas. If a correction differs by 1 ms or more, the recent delay history is cleared so the average/P95 do not mix samples computed against different clock offsets.
+
+If no NTP response arrives, the client keeps using the last successful correction and reports unavailable/stale synchronization in the clock status. Once the last successful sample is older than 15 seconds, the chip reads **SYNC STALE**; successful measurements restore the synced status. `--no-time-sync` skips all periodic NTP work.
+
+### Verify
+
+1. Start the client and observe the **CLOCK** chip and Diagnostics clock offset/RTT fields.
+2. Over at least 30 seconds, confirm the offset updates approximately every 5 seconds without cumulatively growing.
+3. Temporarily stop the LAN NTP server or block its UDP port 9123; the video and YOLO should continue while the clock becomes stale.
+4. Restore the NTP server and verify the sync chip recovers automatically.
+5. Run `python client/stereo_vision_client_qt.py --self-test` to check that two successive offset measurements replace rather than accumulate.
+
+This aligns the application's **latency correction** to the server; it does not set or discipline the Windows system clock and is not evidence of traceable UTC synchronization.
