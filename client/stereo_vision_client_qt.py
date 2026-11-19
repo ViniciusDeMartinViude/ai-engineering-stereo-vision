@@ -77,51 +77,68 @@ class DelayAxis(pg.AxisItem):
 
 
 class DrawViewBox(pg.ViewBox):
-    """Interactive mouse drag to select a new ROI in camera pixel coordinates."""
+    """Mouse-first camera: left drag ROI, right drag pan, wheel zoom, double click reset."""
     selected = QtCore.Signal(tuple)
+    reset_requested = QtCore.Signal()
 
     def __init__(self):
         super().__init__(enableMenu=False, lockAspect=True, invertY=True)
-        self.drawing = False
         self.start = None
         self.preview = QtWidgets.QGraphicsRectItem()
-        self.preview.setPen(pg.mkPen('#ffcb6b', width=3))
-        self.preview.setZValue(100)  # ensure selection outline remains above camera pixels
-        self.preview.setBrush(pg.mkBrush(255, 200, 80, 25))
+        self.preview.setPen(pg.mkPen(COLORS['accent'], width=3))
+        self.preview.setZValue(100)
+        self.preview.setBrush(pg.mkBrush(105, 201, 245, 30))
+        self.preview.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self.addItem(self.preview, ignoreBounds=True)
         self.preview.hide()
-
-    def begin_roi(self):
-        self.drawing = True
-        self.start = None
-        self.preview.hide()
-        self.setMouseEnabled(x=False, y=False)
-
-    def end_roi(self):
-        self.drawing = False
-        self.start = None
-        self.preview.hide()
         self.setMouseEnabled(x=True, y=True)
+        self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
 
     def mouseDragEvent(self, event, axis=None):
-        if not self.drawing or event.button() != QtCore.Qt.MouseButton.LeftButton:
+        if event.button() == QtCore.Qt.MouseButton.RightButton:
+            # Translate the view in image pixels so the image follows the mouse.
+            # The overlay ROI remains in the original image coordinate system.
+            event.accept()
+            if not event.isStart():
+                point = self.mapSceneToView(event.scenePos())
+                previous = self.mapSceneToView(event.lastScenePos())
+                self.translateBy(x=previous.x()-point.x(),
+                                 y=previous.y()-point.y())
+            return
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
             super().mouseDragEvent(event, axis)
             return
         event.accept()
-        p = self.mapSceneToView(event.scenePos())
         if event.isStart():
-            sp = self.mapSceneToView(event.buttonDownScenePos())
-            self.start = (sp.x(), sp.y())
+            origin = self.mapSceneToView(event.buttonDownScenePos())
+            self.start = (origin.x(), origin.y())
         if self.start is None:
             return
+        current = self.mapSceneToView(event.scenePos())
         x0, y0 = self.start
-        x1, y1 = p.x(), p.y()
-        self.preview.setRect(QtCore.QRectF(QtCore.QPointF(x0, y0),
-                                           QtCore.QPointF(x1, y1)).normalized())
+        x1, y1 = current.x(), current.y()
+        self.preview.setRect(QtCore.QRectF(
+            QtCore.QPointF(x0, y0), QtCore.QPointF(x1, y1)).normalized())
         self.preview.show()
         if event.isFinish():
+            self.preview.hide()
             self.selected.emit((x0, y0, x1, y1))
-            self.end_roi()
+            self.start = None
+
+    def mouseClickEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            event.accept()
+            if event.double():
+                self.preview.hide()
+                self.start = None
+                self.reset_requested.emit()
+            return
+        super().mouseClickEvent(event)
+
+    def wheelEvent(self, event, axis=None):
+        # The built-in ViewBox zoom uses the pointer position as the anchor.
+        # Image/YOLO/ROI coordinates are unchanged by view transformations.
+        super().wheelEvent(event, axis)
 
 
 class CameraPanel(QtWidgets.QFrame):
@@ -153,6 +170,12 @@ class CameraPanel(QtWidgets.QFrame):
         hdr.addWidget(self.title)
         hdr.addSpacing(12)
         hdr.addWidget(self.detect_count)
+        self.info = QtWidgets.QLabel('FULL FRAME')
+        self.info.setObjectName('minor')
+        self.info.setToolTip(
+            'Left drag: select ROI · Right drag: pan · Double left click: reset ROI · Wheel: zoom')
+        hdr.addSpacing(8)
+        hdr.addWidget(self.info)
         hdr.addStretch()
         # A single labeled button toggles the camera between full and split.
         self.view_toggle = QtWidgets.QPushButton('Expand view')
@@ -185,19 +208,11 @@ class CameraPanel(QtWidgets.QFrame):
         self.vbox.addItem(self.stale_text, ignoreBounds=True)
         self.stale_text.hide()
         self.vbox.selected.connect(self._new_selection)
+        self.vbox.reset_requested.connect(self.clear_roi)
+        self.graphics.setToolTip(
+            'Left drag: select ROI · Right drag: pan image · '
+            'Double left click: reset ROI · Mouse wheel: zoom')
         layout.addWidget(self.graphics, stretch=1)
-
-        controls = QtWidgets.QHBoxLayout()
-        self.pick = QtWidgets.QPushButton(f'Select {side} ROI')
-        self.pick.clicked.connect(self.start_selection)
-        self.reset = QtWidgets.QPushButton('Reset ROI')
-        self.reset.clicked.connect(self.clear_roi)
-        self.info = QtWidgets.QLabel('FULL FRAME')
-        self.info.setObjectName('minor')
-        controls.addWidget(self.pick)
-        controls.addWidget(self.reset)
-        controls.addWidget(self.info, stretch=1)
-        layout.addLayout(controls)
 
     def _toggle_view(self):
         """Toggle this camera between exclusive and side-by-side views."""
@@ -226,14 +241,9 @@ class CameraPanel(QtWidgets.QFrame):
             self._has_image = True
             self.vbox.setRange(xRange=(0, w), yRange=(0, h), padding=0.01)
 
-    def start_selection(self):
+    def _new_selection(self, corners):
         if not self._has_image:
             return
-        self.pick.setText('Drag on image...')
-        self.vbox.begin_roi()
-
-    def _new_selection(self, corners):
-        self.pick.setText(f'Select {self.side} ROI')
         x0, y0, x1, y1 = corners
         w, h = self.native_shape
         left = max(0, min(w, int(min(x0, x1))))
@@ -244,44 +254,29 @@ class CameraPanel(QtWidgets.QFrame):
             self._set_roi((left, top, right, bottom), emit=True)
 
     def clear_roi(self):
-        self.vbox.end_roi()
-        self.pick.setText(f'Select {self.side} ROI')
+        """Reset YOLO crop to full image without changing the current zoom."""
+        self.vbox.preview.hide()
+        self.vbox.start = None
         self._set_roi(None, emit=True)
 
     def _set_roi(self, bounds, emit):
+        """Keep a passive ROI outline, not draggable Qt resize handles."""
         self.bounds = bounds
         if self.roi_box is not None:
             self.vbox.removeItem(self.roi_box)
             self.roi_box = None
         if bounds is not None:
             x1, y1, x2, y2 = bounds
-            self.roi_box = pg.RectROI((x1, y1), (x2-x1, y2-y1),
-                                      pen=pg.mkPen(self.color, width=3),
-                                      movable=True, rotatable=False,
-                                      sideScalers=False)
-            self.roi_box.addScaleHandle((1, 1), (0, 0))
-            self.roi_box.addScaleHandle((0, 0), (1, 1))
-            self.vbox.addItem(self.roi_box)
-            self.roi_box.sigRegionChangeFinished.connect(self._roi_dragged)
+            outline = QtWidgets.QGraphicsRectItem(x1, y1, x2-x1, y2-y1)
+            outline.setPen(pg.mkPen(self.color, width=3))
+            outline.setBrush(pg.mkBrush(105, 201, 245, 20))
+            outline.setZValue(55)
+            outline.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            self.vbox.addItem(outline, ignoreBounds=True)
+            self.roi_box = outline
         self.info.setText(fmt_roi(bounds))
         if emit:
             self.roi_changed.emit(self.side, bounds)
-
-    def _roi_dragged(self):
-        if self.roi_box is None:
-            return
-        pos = self.roi_box.pos()
-        size = self.roi_box.size()
-        w, h = self.native_shape
-        x1 = max(0, min(w, int(round(pos.x()))))
-        y1 = max(0, min(h, int(round(pos.y()))))
-        x2 = max(0, min(w, int(round(pos.x()+size.x()))))
-        y2 = max(0, min(h, int(round(pos.y()+size.y()))))
-        if x2-x1 < 16 or y2-y1 < 16:
-            return
-        self.bounds = (x1, y1, x2, y2)
-        self.info.setText(fmt_roi(self.bounds))
-        self.roi_changed.emit(self.side, self.bounds)
 
     def set_stale(self, age_s):
         stale = age_s is None or age_s >= THRESHOLDS.stale_after_s
@@ -657,7 +652,10 @@ def main():
         panel.set_image(np.zeros((480, 640, 3), dtype=np.uint8))
         panel._set_roi((30, 40, 250, 300), emit=False)
         assert panel.bounds == (30, 40, 250, 300)
-        panel.clear_roi()
+        assert isinstance(panel.roi_box, QtWidgets.QGraphicsRectItem)
+        assert not isinstance(panel.roi_box, pg.ROI)
+        assert panel.vbox.mouseEnabled() == [True, True]
+        panel.vbox.reset_requested.emit()
         assert panel.bounds is None
         # Only one view button per camera, with correct split/full state.
         assert panel.view_toggle.text() == 'Expand view'
