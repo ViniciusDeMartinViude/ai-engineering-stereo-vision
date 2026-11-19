@@ -1,7 +1,3 @@
-> **Windows Python 3.12 Qt setup:** `conda env create -f environment-qt312.yml` then `conda activate gst-stereo-qt312`. See [Qt Client Guide](docs/QT_CLIENT.md). Do not downgrade the working `gst-stereo` environment.
-
-> **New experimental PySide6 + PyQtGraph client:** see [Qt Client Guide](docs/QT_CLIENT.md). Run `python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11` on this branch. The original Tkinter client is still included, and `main` is unchanged.
-
 # AI Engineering Stereo Vision
 
 Stereo vision capture and low-latency distribution for the Emirates Skills AI Engineering competition.
@@ -12,26 +8,32 @@ Two Logitech MX Brio cameras are combined into a side-by-side video stream on a 
 
 The earlier single-client UDP system showed very high timestamp decode reliability in testing. **Multi-client operation still needs validation on real hardware.** WebRTC/MediaMTX experiments were less reliable for the visual timestamp and are not the current baseline.
 
+## Supported Python version: 3.12
+
+**Use Python 3.12.x on Windows for the PySide6 + PyQtGraph client.** The tested Qt application now lives on `main`. For a clean environment, use `conda env create -f environment-qt312.yml` and `conda activate gst-stereo-qt312-qt312`. See [Qt client setup](docs/QT_CLIENT.md). The older Tkinter client is retained as a fallback.
+
 ## Quick start (Windows + Conda)
 
-1. Install GStreamer with DirectShow, NVENC and UDP plugins and Python GStreamer bindings (see `docs/WINDOWS_SETUP.md`).
+1. Install the Python **3.12** environment from `environment-qt312.yml` and the Windows GStreamer plugins (see `docs/WINDOWS_SETUP.md`).
 2. Keep all computers on the same wired LAN/VLAN; ensure IGMP snooping works on the Ethernet switch (and an IGMP querier is present where required).
 3. Start the server:
 
    ```powershell
-   conda activate gst-stereo
+   conda activate gst-stereo-qt312
    python server/stereo_vision_server_multiclient.py
    ```
 
 4. On each student PC:
 
    ```powershell
-   conda activate gst-stereo
-   python client/stereo_vision_client_multiclient.py --self-test
-   python client/stereo_vision_client_multiclient.py --port 5000 --iface-ip RECEIVER_ETHERNET_IP
+   conda activate gst-stereo-qt312
+   python client/stereo_vision_client_qt.py --self-test
+   python client/stereo_vision_client_qt.py --port 5000 --iface-ip RECEIVER_ETHERNET_IP --time-server SERVER_ETHERNET_IP
    ```
 
 The default shared multicast group is `239.10.10.10:5000`. Students join it automatically. The student PCs must allow inbound UDP port 5000 on the trusted LAN. Only one process can bind the receiving port on each machine. Stop VLC or an older receiver before starting the Python client.
+
+The **recommended GUI** is `client/stereo_vision_client_qt.py` (PySide6 + PyQtGraph). The previous `client/stereo_vision_client_multiclient.py` (Tkinter) remains available for troubleshooting.
 
 ## Scope
 
@@ -97,10 +99,10 @@ Both preview windows now open **maximized** on Windows (showing the taskbar). Pr
 
 The client can run **local Ultralytics YOLO object detection** on both stereo images, independently. This is optional: without \`--yolo-model\`, the existing multicast viewer works unchanged. It draws bounding boxes, class names and confidence percentages over the displayed images, along with an inference status/count. The model sees only the camera image regions (not the 100-pixel binary timestamp footer). Original H.264 packets and CRC16 timestamp are unchanged.
 
-Install YOLO into your existing \`gst-stereo\` Conda environment **on each student/receiver PC that will run inference**:
+Install YOLO into the Python 3.12 \`gst-stereo-qt312\` Conda environment **on each student/receiver PC that will run inference**:
 
 \`\`\`powershell
-conda activate gst-stereo
+conda activate gst-stereo-qt312
 python -m pip install ultralytics
 \`\`\`
 
