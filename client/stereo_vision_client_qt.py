@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import concurrent.futures
 import statistics
 import sys
 import time
@@ -357,11 +358,16 @@ class Studio(QtWidgets.QMainWindow):
         self.timestamps = collections.deque(maxlen=300)
         self.clock_offset = args.clock_offset_ms
         self.clock_status = 'not measured'
+        self.last_clock_sync_mono = None
+        self.clock_sync_error = None
+        self._sync_future = None
+        self._sync_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='stereo-ntp')
         self.latest_stamp = None
         self.view_mode = 'both'
         self._last_overlay_id = -1
         self._last_overlay_mono = 0
-        self.setWindowTitle('AI Stereo Vision Studio  |  PySide6 + PyQtGraph')
+        self.setWindowTitle('AI ENGINEERING - STEREO VISION STUDIO')
         self.setMinimumSize(960, 640)
         self._build()
         self._start_services()
@@ -433,6 +439,7 @@ class Studio(QtWidgets.QMainWindow):
         shortcut = QtGui.QShortcut(QtGui.QKeySequence('Escape'), self)
         shortcut.activated.connect(self.showMaximized)
         self.health_timer = QtCore.QTimer(self)
+        self.health_timer.timeout.connect(self._poll_clock_sync)
         self.health_timer.timeout.connect(self._refresh_metrics)
         self.health_timer.start(100)
 
@@ -471,9 +478,14 @@ class Studio(QtWidgets.QMainWindow):
         if self.args.no_time_sync:
             self.clock_chip.display('neutral','DISABLED')
         elif self.sync_rtt is None:
-            self.clock_chip.display('warning','UNAVAILABLE')
+            self.clock_chip.display('warning', 'SYNCING' if self._sync_future is not None
+                                    else 'UNAVAILABLE')
+        elif (self.last_clock_sync_mono is not None and
+              now - self.last_clock_sync_mono > 15.0):
+            self.clock_chip.display('warning', 'SYNC STALE · last correction retained')
         else:
-            self.clock_chip.display('good', f'{self.clock_offset:+.1f} ms · RTT {self.sync_rtt:.2f} ms')
+            self.clock_chip.display('good',
+                f'{self.clock_offset:+.1f} ms · RTT {self.sync_rtt:.2f} ms')
         if not self.yolo:
             self.yolo_chip.display('neutral', 'DISABLED')
         else:
@@ -516,19 +528,59 @@ class Studio(QtWidgets.QMainWindow):
                 self.history.update_samples(self.age_samples,self.skew_samples)
                 self.last_chart_update = now
 
+    def _schedule_clock_sync(self):
+        """Schedule a fresh absolute client-minus-server correction off the GUI thread."""
+        if self._closing or self.args.no_time_sync:
+            return
+        if self._sync_future is not None:
+            # An outstanding measurement may take longer than five seconds.
+            # Do not queue overlapping or unbounded SNTP calls.
+            return
+        self._sync_future = self._sync_executor.submit(
+            measure_ntp_offset,
+            self.args.time_server, self.args.ntp_port, self.args.ntp_samples)
+
+    def _poll_clock_sync(self):
+        """Consume completed NTP samples on the GUI thread without blocking video."""
+        future = self._sync_future
+        if future is None or not future.done():
+            return
+        self._sync_future = None
+        try:
+            offset_ms, rtt_ms, count = future.result()
+        except (OSError, TimeoutError, ValueError) as exc:
+            self.clock_sync_error = str(exc)
+            self.clock_status = f'Clock sync unavailable: {exc}'
+            # Preserve the last successful correction; show stale after 15 s.
+            return
+        if self._closing:
+            return
+        previous_offset = self.clock_offset
+        # Recalculate from the original user-supplied manual correction every
+        # time. Adding to the prior value would accumulate a false drift.
+        self.clock_offset = self.args.clock_offset_ms + offset_ms
+        self.sync_rtt = rtt_ms
+        self.sync_sample_count = count
+        self.last_clock_sync_mono = time.monotonic()
+        self.clock_sync_error = None
+        self.clock_status = (
+            f'Clock offset {offset_ms:+.2f} ms; '
+            f'RTT {rtt_ms:.2f} ms ({count} samples); resync every 5 s')
+        # Existing samples were calculated against the previous correction.
+        # A material correction should not mix old/new clock bases in KPIs.
+        if abs(self.clock_offset - previous_offset) >= 1.0:
+            self.age_samples.clear()
+
     def _start_services(self):
-        if not self.args.no_time_sync:
-            try:
-                offset, rtt, samples = measure_ntp_offset(
-                    self.args.time_server, self.args.ntp_port, self.args.ntp_samples)
-                self.clock_offset += offset
-                self.sync_rtt = rtt
-                self.sync_sample_count = samples
-                self.clock_status = f'Clock offset {offset:+.1f} ms; RTT {rtt:.2f} ms ({samples} samples)'
-            except (OSError, TimeoutError, ValueError) as exc:
-                self.clock_status = f'Clock sync unavailable: {exc}'
-        else:
+        if self.args.no_time_sync:
             self.clock_status = 'Clock sync disabled'
+        else:
+            self.clock_status = 'Clock sync in progress'
+            self._schedule_clock_sync()
+            self.clock_sync_timer = QtCore.QTimer(self)
+            self.clock_sync_timer.setInterval(5000)
+            self.clock_sync_timer.timeout.connect(self._schedule_clock_sync)
+            self.clock_sync_timer.start()
         self.reader = StreamReceiver(
             self.args.port, self.args.transport, self.args.multicast_group,
             None, self.args.iface_ip, self.args.relay_port)
@@ -610,6 +662,11 @@ class Studio(QtWidgets.QMainWindow):
         self._closing = True
         if hasattr(self, 'timer'):
             self.timer.stop()
+        if hasattr(self, 'health_timer'):
+            self.health_timer.stop()
+        if hasattr(self, 'clock_sync_timer'):
+            self.clock_sync_timer.stop()
+        self._sync_executor.shutdown(wait=False, cancel_futures=True)
         if self.yolo:
             self.yolo.stop()
         if self.reader:
@@ -701,7 +758,23 @@ def main():
         chart = LatencyChart(DelayAxis)
         chart.update_samples([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
         assert chart._display_count == 3
-        print('PASS: Qt control-room widgets, ROI, seven-segment, smoothing, and chart')
+        import types
+        # Repeated SNTP corrections must be absolute, never cumulative.
+        dummy_args = types.SimpleNamespace(clock_offset_ms=3.0, no_time_sync=False)
+        dummy = types.SimpleNamespace(
+            _sync_future=concurrent.futures.Future(), _closing=False,
+            args=dummy_args, clock_offset=3.0, age_samples=collections.deque([10.0]),
+            sync_rtt=None, sync_sample_count=0, last_clock_sync_mono=None,
+            clock_sync_error=None, clock_status='')
+        dummy._sync_future.set_result((11.0, 0.3, 7))
+        Studio._poll_clock_sync(dummy)
+        assert dummy.clock_offset == 14.0
+        assert not dummy.age_samples
+        dummy._sync_future = concurrent.futures.Future()
+        dummy._sync_future.set_result((12.0, 0.2, 7))
+        Studio._poll_clock_sync(dummy)
+        assert dummy.clock_offset == 15.0, 'NTP offset must not accumulate'
+        print('PASS: Qt control-room widgets, ROI, seven-segment, smoothing, chart and periodic clock sync')
         return 0
     studio = Studio(args)
     studio.showMaximized()
