@@ -381,7 +381,8 @@ class Studio(QtWidgets.QMainWindow):
         self.cameras.addWidget(self.left_panel)
         self.cameras.addWidget(self.right_panel)
         self.cameras.setSizes([700, 700])
-        main.addWidget(self.cameras, stretch=10)
+        # Give cameras all remaining vertical space after the compact telemetry.
+        main.addWidget(self.cameras, stretch=1)
 
         self.telemetry = TelemetryBar()
         main.addWidget(self.telemetry)
@@ -392,7 +393,8 @@ class Studio(QtWidgets.QMainWindow):
         bottom.setSpacing(5)
         self.average_delay_card = KpiCard('AVERAGE DELAY', 'Last 100 valid frames',
                                           led_color=COLORS['accent'])
-        self.delay_p95_card = KpiCard('DELAY P95 / JITTER', 'Last 100 valid frames')
+        self.delay_p95_card = KpiCard('DELAY P95', 'Last 100 valid frames',
+                                     led_color=COLORS['accent'])
         self.skew_card = KpiCard('CAMERA SKEW R−L', 'Smoothed · τ = 1.5 s',
                                  led_color=COLORS['accent'])
         bottom.addWidget(self.average_delay_card, 2)
@@ -400,6 +402,9 @@ class Studio(QtWidgets.QMainWindow):
         bottom.addWidget(self.skew_card, 2)
         self.history = LatencyChart(DelayAxis)
         bottom.addWidget(self.history, 5)
+        # On typical 1080p windows, the cameras occupy about two-thirds of
+        # the available vertical space. The lower strip never expands to
+        # compete with the video area.
         main.addLayout(bottom, stretch=0)
 
         self.setCentralWidget(root)
@@ -490,7 +495,7 @@ class Studio(QtWidgets.QMainWindow):
                     secondary=f'Avg · last {len(values)} valid frames · {np.min(values):.0f}–{np.max(values):.0f} ms')
             p95 = float(np.percentile(values, 95))
             jitter = float(np.std(np.diff(values))) if len(values)>1 else 0.0
-            self.delay_p95_card.set_value(text=f'{p95:.1f} ms',
+            self.delay_p95_card.set_value(value_ms=p95,
                     secondary=f'Jitter (std Δ): {jitter:.1f} ms · {len(values)} frames')
             self.skew_card.set_value(self.skew_smoother.value,
                     secondary=f'EMA τ=1.5 s · last {self.last_skew_ms:+.2f} ms')
@@ -663,6 +668,9 @@ def main():
         cards = KpiCard('AVERAGE DELAY', 'Last 100', led_color=COLORS['accent'])
         cards.set_value(12.3)
         assert cards.readout.digits == '123'
+        p95_card = KpiCard('DELAY P95', 'Last 100', led_color=COLORS['accent'])
+        p95_card.set_value(value_ms=245.0)
+        assert p95_card.readout is not None and p95_card.readout.digits == '245'
         diagnostics = DiagnosticsPanel()
         assert not diagnostics.contents.isVisible()
         chart = LatencyChart(DelayAxis)
