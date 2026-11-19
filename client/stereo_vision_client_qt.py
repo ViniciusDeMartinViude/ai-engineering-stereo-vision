@@ -126,6 +126,7 @@ class DrawViewBox(pg.ViewBox):
 
 class CameraPanel(QtWidgets.QFrame):
     roi_changed = QtCore.Signal(str, object)
+    view_requested = QtCore.Signal(str)
 
     def __init__(self, side, color, parent=None):
         super().__init__(parent)
@@ -138,15 +139,29 @@ class CameraPanel(QtWidgets.QFrame):
         self._has_image = False
         self.setObjectName('cameraPanel')
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(3)
         hdr = QtWidgets.QHBoxLayout()
-        self.title = QtWidgets.QLabel(f'{side} CAMERA')
+        self.title = QtWidgets.QLabel(('◉ L' if side == 'LEFT' else '◉ R'))
         self.title.setObjectName('cameraTitle')
+        self.title.setToolTip(f'{side} camera')
         self.detect_count = QtWidgets.QLabel('0 detections')
         self.detect_count.setObjectName('minor')
         hdr.addWidget(self.title)
-        hdr.addStretch()
         hdr.addWidget(self.detect_count)
+        hdr.addStretch()
+        # View selection lives in each camera header (no separate toolbar).
+        self.both_view = QtWidgets.QPushButton('◫')
+        self.both_view.setToolTip('Show both cameras · 1')
+        self.both_view.setFixedWidth(38)
+        self.both_view.clicked.connect(lambda: self.view_requested.emit('both'))
+        self.single_view = QtWidgets.QPushButton('▣')
+        self.single_view.setToolTip(f'Expand {side.lower()} camera · {2 if side == "LEFT" else 3}')
+        self.single_view.setFixedWidth(38)
+        self.single_view.clicked.connect(
+            lambda: self.view_requested.emit(self.side.lower()))
+        hdr.addWidget(self.both_view)
+        hdr.addWidget(self.single_view)
         layout.addLayout(hdr)
 
         self.graphics = pg.GraphicsLayoutWidget()
@@ -361,32 +376,21 @@ class Studio(QtWidgets.QMainWindow):
             header.addWidget(chip)
         main.addLayout(header)
 
-        toolbar = QtWidgets.QHBoxLayout()
-        self.views = SegmentedControl()
-        self.views.selected.connect(self.change_view)
-        toolbar.addWidget(self.views)
-        toolbar.addStretch()
-        help_button = QtWidgets.QPushButton('?')
-        help_button.setFixedWidth(36)
-        help_button.setToolTip('Keyboard shortcuts and help')
-        help_button.clicked.connect(self._show_help)
-        toolbar.addWidget(help_button)
-        main.addLayout(toolbar)
-
         self.cameras = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.left_panel = CameraPanel('LEFT', COLORS['accent'])
         self.right_panel = CameraPanel('RIGHT', COLORS['accent'])
         self.left_panel.roi_changed.connect(self._roi_changed)
         self.right_panel.roi_changed.connect(self._roi_changed)
+        self.left_panel.view_requested.connect(self.change_view)
+        self.right_panel.view_requested.connect(self.change_view)
         self.cameras.addWidget(self.left_panel)
         self.cameras.addWidget(self.right_panel)
         self.cameras.setSizes([700, 700])
         # Give cameras all remaining vertical space after the compact telemetry.
         main.addWidget(self.cameras, stretch=1)
 
-        self.telemetry = TelemetryBar()
-        main.addWidget(self.telemetry)
         self.diagnostics = DiagnosticsPanel()
+        self.telemetry = self.diagnostics.telemetry
         main.addWidget(self.diagnostics)
 
         bottom = QtWidgets.QHBoxLayout()
@@ -411,7 +415,7 @@ class Studio(QtWidgets.QMainWindow):
         self.statusBar().showMessage('1 Both  ·  2 Left  ·  3 Right  ·  F Fullscreen  ·  Esc Windowed')
         for key, mode in [('1','both'),('2','left'),('3','right')]:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
-            shortcut.activated.connect(lambda v=mode: self.views.select(v))
+            shortcut.activated.connect(lambda v=mode: self.change_view(v))
         shortcut = QtGui.QShortcut(QtGui.QKeySequence('F'), self)
         shortcut.activated.connect(self.toggle_fullscreen)
         shortcut = QtGui.QShortcut(QtGui.QKeySequence('Escape'), self)
@@ -420,14 +424,6 @@ class Studio(QtWidgets.QMainWindow):
         self.health_timer.timeout.connect(self._refresh_metrics)
         self.health_timer.start(100)
 
-    def _show_help(self):
-        QtWidgets.QMessageBox.information(
-            self, 'Stereo Vision keyboard shortcuts',
-            '1 · Both cameras\n2 · Left camera\n3 · Right camera\n'
-            'F · Fullscreen\nEsc · Maximized window\n\n'
-            'Use Select ROI then drag in the camera; Reset ROI restores full frame.\n'
-            'Diagnostics expands the original timestamp barcode.')
-
     def toggle_fullscreen(self):
         self.showMaximized() if self.isFullScreen() else self.showFullScreen()
 
@@ -435,6 +431,10 @@ class Studio(QtWidgets.QMainWindow):
         self.view_mode = mode
         self.left_panel.setVisible(mode != 'right')
         self.right_panel.setVisible(mode != 'left')
+        self.left_panel.both_view.setEnabled(mode != 'both')
+        self.right_panel.both_view.setEnabled(mode != 'both')
+        self.left_panel.single_view.setEnabled(mode != 'left')
+        self.right_panel.single_view.setEnabled(mode != 'right')
 
     def _roi_changed(self, side, bounds):
         if self.yolo:
@@ -479,6 +479,7 @@ class Studio(QtWidgets.QMainWindow):
         for panel in (self.left_panel, self.right_panel):
             if panel._has_image:
                 panel.set_hud(recv_fps, self.last_age_ms)
+        self.diagnostics.update_counts(self.valid, self.invalid, self.missing)
         if self.last_stamp is not None:
             st = self.last_stamp
             self.telemetry.update_fields(
@@ -673,6 +674,9 @@ def main():
         assert p95_card.readout is not None and p95_card.readout.digits == '245'
         diagnostics = DiagnosticsPanel()
         assert not diagnostics.contents.isVisible()
+        diagnostics.update_counts(12, 1, 2)
+        assert 'Invalid 1' in diagnostics.crc_summary.text()
+        assert diagnostics.telemetry.fields['crc'].name.text() == 'CRC VALID'
         chart = LatencyChart(DelayAxis)
         chart.update_samples([1.0, 2.0, 3.0], [0.1, 0.2, 0.3])
         assert chart._display_count == 3
