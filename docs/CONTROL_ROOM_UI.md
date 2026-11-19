@@ -112,3 +112,11 @@ The lower Average Delay, Delay P95 and Skew seven-segment readouts and framed gr
 Each panel again uses a readable **LEFT CAMERA** or **RIGHT CAMERA** title, followed by a clear detection-count label. A **single view button** replaces the previous pair of cryptic icon buttons: in split mode it reads **Expand view**, and when that camera is expanded it reads **Both cameras**. The button and its tooltip update together, and keyboard shortcuts **1** (both), **2** (left), and **3** (right) remain available. No new toolbar is introduced.
 
 Use the same Python 3.12 environment and run `python client/stereo_vision_client_qt.py --self-test` after updating the branch. Confirm that each camera's one button expands its panel and returns to both-camera mode, and that toggling does not affect YOLO detections or ROI.
+
+## Camera-header surface and spacing polish
+
+- The permanent bottom shortcut/status line is hidden; the available shortcuts still work (1/2/3 camera views, F fullscreen, Esc maximized). ROI coordinates stay visible beside each camera's ROI controls, instead of flashing in a footer.
+- The camera splitter handle width is now **9 px** for a slightly wider visual gap between the two views.
+- The LEFT CAMERA and RIGHT CAMERA header bands, and the Diagnostics header containing the CRC Valid / Invalid / Lost summary, now use the **raised-surface** color, border and radius from `client/theme.py`, matching the Expand view button. This avoids the sharp black-background transition.
+
+Recheck both-camera and single-camera layouts, Diagnostics collapse/expand and keyboard shortcuts after updating the branch.
