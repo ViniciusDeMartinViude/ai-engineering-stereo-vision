@@ -654,7 +654,7 @@ def main():
         assert panel.bounds == (30, 40, 250, 300)
         assert isinstance(panel.roi_box, QtWidgets.QGraphicsRectItem)
         assert not isinstance(panel.roi_box, pg.ROI)
-        assert panel.vbox.mouseEnabled() == [True, True]
+        assert panel.vbox.state['mouseEnabled'] == [True, True]
         panel.vbox.reset_requested.emit()
         assert panel.bounds is None
         # Only one view button per camera, with correct split/full state.
