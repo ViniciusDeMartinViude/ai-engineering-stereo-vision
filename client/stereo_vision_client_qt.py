@@ -142,26 +142,21 @@ class CameraPanel(QtWidgets.QFrame):
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(3)
         hdr = QtWidgets.QHBoxLayout()
-        self.title = QtWidgets.QLabel(('◉ L' if side == 'LEFT' else '◉ R'))
+        self.title = QtWidgets.QLabel(f'{side} CAMERA')
         self.title.setObjectName('cameraTitle')
-        self.title.setToolTip(f'{side} camera')
-        self.detect_count = QtWidgets.QLabel('0 detections')
+        self.detect_count = QtWidgets.QLabel('○ 0 detected')
         self.detect_count.setObjectName('minor')
         hdr.addWidget(self.title)
+        hdr.addSpacing(12)
         hdr.addWidget(self.detect_count)
         hdr.addStretch()
-        # View selection lives in each camera header (no separate toolbar).
-        self.both_view = QtWidgets.QPushButton('◫')
-        self.both_view.setToolTip('Show both cameras · 1')
-        self.both_view.setFixedWidth(38)
-        self.both_view.clicked.connect(lambda: self.view_requested.emit('both'))
-        self.single_view = QtWidgets.QPushButton('▣')
-        self.single_view.setToolTip(f'Expand {side.lower()} camera · {2 if side == "LEFT" else 3}')
-        self.single_view.setFixedWidth(38)
-        self.single_view.clicked.connect(
-            lambda: self.view_requested.emit(self.side.lower()))
-        hdr.addWidget(self.both_view)
-        hdr.addWidget(self.single_view)
+        # A single labeled button toggles the camera between full and split.
+        self.view_toggle = QtWidgets.QPushButton('Expand view')
+        self.view_toggle.setMinimumWidth(108)
+        self.view_toggle.setToolTip(
+            f'Expand {side.lower()} camera · shortcut {2 if side == "LEFT" else 3}')
+        self.view_toggle.clicked.connect(self._toggle_view)
+        hdr.addWidget(self.view_toggle)
         layout.addLayout(hdr)
 
         self.graphics = pg.GraphicsLayoutWidget()
@@ -199,6 +194,21 @@ class CameraPanel(QtWidgets.QFrame):
         controls.addWidget(self.reset)
         controls.addWidget(self.info, stretch=1)
         layout.addLayout(controls)
+
+    def _toggle_view(self):
+        """Toggle this camera between exclusive and side-by-side views."""
+        self.view_requested.emit('both' if self.view_toggle.property('expanded') else self.side.lower())
+
+    def set_view_mode(self, mode):
+        """Update the sole view button when the parent switches camera modes."""
+        expanded = mode == self.side.lower()
+        self.view_toggle.setProperty('expanded', expanded)
+        label = 'Both cameras' if expanded else 'Expand view'
+        if self.view_toggle.text() != label:
+            self.view_toggle.setText(label)
+        shortcut = '1' if expanded else ('2' if self.side == 'LEFT' else '3')
+        self.view_toggle.setToolTip(
+            f'{"Return to both cameras" if expanded else "Expand " + self.side.lower() + " camera"} · shortcut {shortcut}')
 
     def set_image(self, bgr):
         h, w = bgr.shape[:2]
@@ -386,6 +396,7 @@ class Studio(QtWidgets.QMainWindow):
         self.cameras.addWidget(self.left_panel)
         self.cameras.addWidget(self.right_panel)
         self.cameras.setSizes([700, 700])
+        self.change_view('both')
         # Give cameras all remaining vertical space after the compact telemetry.
         main.addWidget(self.cameras, stretch=1)
 
@@ -428,13 +439,13 @@ class Studio(QtWidgets.QMainWindow):
         self.showMaximized() if self.isFullScreen() else self.showFullScreen()
 
     def change_view(self, mode):
+        if mode not in ('both', 'left', 'right'):
+            return
         self.view_mode = mode
         self.left_panel.setVisible(mode != 'right')
         self.right_panel.setVisible(mode != 'left')
-        self.left_panel.both_view.setEnabled(mode != 'both')
-        self.right_panel.both_view.setEnabled(mode != 'both')
-        self.left_panel.single_view.setEnabled(mode != 'left')
-        self.right_panel.single_view.setEnabled(mode != 'right')
+        self.left_panel.set_view_mode(mode)
+        self.right_panel.set_view_mode(mode)
 
     def _roi_changed(self, side, bounds):
         if self.yolo:
@@ -642,6 +653,12 @@ def main():
         assert panel.bounds == (30, 40, 250, 300)
         panel.clear_roi()
         assert panel.bounds is None
+        # Only one view button per camera, with correct split/full state.
+        assert panel.view_toggle.text() == 'Expand view'
+        panel.set_view_mode('left')
+        assert panel.view_toggle.text() == 'Both cameras'
+        panel.set_view_mode('both')
+        assert panel.view_toggle.text() == 'Expand view'
         # Three-digit rendering: decimals and units automatically scale.
         for value, expected in [(12.34, ('123', 2, '', 'ms')),
                                 (0.125, ('125', 0, '', 'ms')),
