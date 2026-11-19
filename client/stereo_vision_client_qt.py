@@ -374,7 +374,7 @@ class Studio(QtWidgets.QMainWindow):
         main.setSpacing(5)
 
         header = QtWidgets.QHBoxLayout()
-        brand = QtWidgets.QLabel('◉ AI STEREO VISION STUDIO')
+        brand = QtWidgets.QLabel('◉ AI ENGINEERING - STEREO VISION STUDIO')
         brand.setObjectName('appTitle')
         header.addWidget(brand)
         header.addStretch()
