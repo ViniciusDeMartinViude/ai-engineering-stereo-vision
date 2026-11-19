@@ -123,3 +123,23 @@ To run the retained Tkinter fallback (also available on `main`):
 ```powershell
 python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11
 ```
+
+## Seven-segment timing instruments (bottom telemetry area)
+
+Two large, custom-rendered, anti-aliased **seven-segment** instruments are displayed alongside the latency plot. The original 168-bit binary timestamp / CRC16 strip and plot are both retained:
+
+- **AVERAGE DELAY** (green) is the arithmetic mean of the most recent **up to 300 valid, NTP-corrected left-camera frame ages**, displayed as a rolling average.
+- **CAMERA SKEW R-L** (amber) is the latest frame's signed right-camera-minus-left-camera timestamp difference. A positive sign means the right camera timestamp is later. This is **not** an average.
+- Both instruments render **three significant digits** with a moving decimal point: e.g. `1.23 ms`, `12.3 ms`, `123 ms`, `.125 ms`. Values below `0.1 ms` switch to `µs`; values of about `1000 ms` and above switch to `s`. Negative skew shows a minus sign.
+- Invalid-CRC frames do not update the readings. Before the first valid frame each instrument displays dashes.
+- This is a client display-only improvement; timestamp extraction, multicast, YOLO and ROI selection are unchanged.
+
+Update `main`, activate the Python 3.12 environment, and run:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+conda activate gst-stereo-qt312
+python client/stereo_vision_client_qt.py --self-test
+python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11 --time-server 192.168.0.10
+```
