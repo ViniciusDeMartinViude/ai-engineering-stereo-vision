@@ -99,7 +99,7 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         p.setPen(QtCore.Qt.PenStyle.NoPen)
         active = self.color
         inactive = QtGui.QColor(active)
-        inactive.setAlpha(30)
+        inactive.setAlpha(8)  # barely visible unlit segments; lit LEDs stay bright
 
         # Fixed slot layout: sign, three 43px digits, units.
         if self.sign:
