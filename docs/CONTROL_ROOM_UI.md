@@ -91,3 +91,18 @@ The camera splitter now receives the flexible vertical space while the bottom KP
 **All three KPI cards** (average delay, P95 delay and smoothed skew) now use three-significant-digit seven-segment readouts. P95 remains the 95th percentile of the most recent up to 100 valid frame ages; the jitter (standard deviation of consecutive delay differences) remains visible in its card's secondary line. No timestamp, latency, skew or decoding calculations were changed.
 
 After updating the branch, verify that all three LED readouts show, the video area is taller, and no controls overlap at the target resolution. If 1366×768 clips the bottom strip, report the screen scaling and screenshot.
+
+## Camera-header controls and reclaimed screen space
+
+The view selector buttons are integrated into **both camera headers**: **◫** restores the two-camera split view and **▣** expands the corresponding left or right camera. Hover tooltips describe the actions; shortcuts **1 / 2 / 3** remain. The separate view-selector toolbar and its **? help modal** were removed; fullscreen **F** and maximized **Esc** shortcuts remain.
+
+The former full-width CRC/timestamp/clock telemetry bar now lives **inside expanded Diagnostics** with the original barcode. The collapsed Diagnostics band shows a small summary (**CRC Valid / Invalid / Lost**) and warns when error/loss counters are nonzero. This releases a full row of vertical space in normal operation.
+
+The lower Average Delay, Delay P95 and Skew seven-segment readouts and framed graph can now grow between approximately **148 and 192 px**, using the reclaimed height while the camera splitter retains the remainder of the window. The ROI controls remain in each camera panel. Expect exact geometry to vary with Windows text scaling and window chrome.
+
+### Verification
+
+1. Pull `feature/control-room-ui`, run `--self-test`, and launch with the known-good Python 3.12 environment.
+2. Verify camera-header **◫** and **▣** buttons, plus shortcuts 1/2/3/F/Esc.
+3. Open Diagnostics and verify CRC counts, timestamps, clock offset/RTT and barcode. Close it and verify the detailed band disappears.
+4. At the same screen resolution, compare the increased seven-segment and chart heights, plus the available camera image height. Check no overlap in fullscreen.
