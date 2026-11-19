@@ -38,6 +38,39 @@ def fmt_roi(roi):
     return f'{x1},{y1}  {x2-x1} x {y2-y1}'
 
 
+class DelayAxis(pg.AxisItem):
+    """Graph axis: data stays in ms, labels switch between ms and s.
+
+    Disable SI prefixes here: pyqtgraph may otherwise label kiloms as 'kms'.
+    """
+    def __init__(self, orientation='left'):
+        super().__init__(orientation=orientation)
+        self.unit = 'ms'
+        self.enableAutoSIPrefix(False)
+        self.setLabel('Delay (ms)', color='#eaf4ff', size='12pt')
+
+    def update_for_range(self, low_ms, high_ms):
+        unit = 's' if max(abs(low_ms), abs(high_ms)) >= 1000.0 else 'ms'
+        if unit != self.unit:
+            self.unit = unit
+            self.setLabel(f'Delay ({unit})', color='#eaf4ff', size='12pt')
+            self.picture = None
+            self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        divisor = 1000.0 if self.unit == 's' else 1.0
+        step = abs(spacing / divisor)
+        if step >= 10:
+            decimals = 0
+        elif step >= 1:
+            decimals = 1
+        elif step >= 0.1:
+            decimals = 2
+        else:
+            decimals = 3
+        return [f'{value / divisor:.{decimals}f}' for value in values]
+
+
 class DrawViewBox(pg.ViewBox):
     """Interactive mouse drag to select a new ROI in camera pixel coordinates."""
     selected = QtCore.Signal(tuple)
@@ -317,22 +350,20 @@ class Studio(QtWidgets.QMainWindow):
         telemetry_layout.addWidget(self.bar_label)
         main.addWidget(telemetry, stretch=0)
 
-        self.chart = pg.PlotWidget()
+        self.delay_axis = DelayAxis('left')
+        self.chart = pg.PlotWidget(axisItems={'left': self.delay_axis})
         self.chart.setMinimumHeight(120)
         self.chart.setMaximumHeight(180)
-        # Plot seconds explicitly so SI scaling cannot produce "kms".
         self.chart.setTitle('ONE-WAY FRAME AGE', color='#d6e8fa', size='12pt')
-        self.chart.setLabel('left', 'Delay (s)', color='#eaf4ff', size='12pt')
         self.chart.setLabel('bottom', 'Recent decoded frames', color='#b6c8dc', size='10pt')
-        y_axis = self.chart.getAxis('left')
-        y_axis.enableAutoSIPrefix(False)
-        y_axis.setWidth(76)
-        y_axis.setStyle(tickTextOffset=12)
-        y_axis.setTickFont(QtGui.QFont('Segoe UI', 11))
+        self.delay_axis.setWidth(76)
+        self.delay_axis.setStyle(tickTextOffset=12)
+        self.delay_axis.setTickFont(QtGui.QFont('Segoe UI', 11))
         self.chart.showGrid(x=True, y=True, alpha=0.2)
         self.chart.addLegend(offset=(10, 10))
         self.age_curve = self.chart.plot(pen=pg.mkPen('#ffd56d', width=2.5),
-                                         name='Frame delay (s)')
+                                         name='Frame delay')
+        self.chart.getViewBox().sigYRangeChanged.connect(self._update_delay_axis)
         # Instruments on the LEFT; graph on the RIGHT; binary stays above.
         bottom = QtWidgets.QHBoxLayout()
         bottom.setSpacing(9)
@@ -352,6 +383,11 @@ class Studio(QtWidgets.QMainWindow):
         shortcut.activated.connect(self.toggle_fullscreen)
         escape = QtGui.QShortcut(QtGui.QKeySequence('Escape'), self)
         escape.activated.connect(self.showMaximized)
+
+    def _update_delay_axis(self, *args):
+        """Follow the visible graph range, including zoom and autoscaling."""
+        low_ms, high_ms = self.chart.getViewBox().viewRange()[1]
+        self.delay_axis.update_for_range(low_ms, high_ms)
 
     def toggle_fullscreen(self):
         self.showMaximized() if self.isFullScreen() else self.showFullScreen()
@@ -443,8 +479,11 @@ class Studio(QtWidgets.QMainWindow):
                 f'    •    Age {age:.0f} ms'
                 f'    •    Skew {stamp.right_minus_left_us/1000:+.1f} ms'
                 f'    •    {self.clock_status}')
+            # Plot the original millisecond samples. DelayAxis formats
+            # the displayed Y values in ms or s without changing data.
             self.age_curve.setData(np.arange(len(self.age_samples)),
-                                   np.array(self.age_samples, dtype=float) / 1000.0)
+                                   np.array(self.age_samples, dtype=float))
+            self._update_delay_axis()
         else:
             self.invalid += 1
             self.stats.setText(f'Invalid embedded timestamp: {err}  |  CRC OK {self.valid}')
@@ -525,7 +564,12 @@ def main():
         midway = smoother.update(10.0, 1.5)
         assert 6.0 < midway < 6.5, midway
         assert smoother.update(10.0, 1.5) == midway
-        print('PASS: Qt image, ROI, seven-segment instruments, and skew smoothing')
+        axis = DelayAxis()
+        axis.update_for_range(0, 500)
+        assert axis.unit == 'ms' and axis.tickStrings([250], 1, 50) == ['250']
+        axis.update_for_range(0, 2400)
+        assert axis.unit == 's' and axis.tickStrings([1500], 1, 100) == ['1.50']
+        print('PASS: Qt image, ROI, seven-segment instruments, skew smoothing, and dynamic ms/s chart')
         return 0
     studio = Studio(args)
     studio.showMaximized()
