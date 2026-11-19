@@ -54,7 +54,7 @@ Replace 192.168.0.11 with the receiver's Ethernet IP if it changed. Stop other U
 
 1. Run `--self-test`; if it fails, capture the entire traceback.
 2. With the real server, compare 60 seconds of latency and CRC counters against `main` on the **same LAN and workload**.
-3. Confirm both cameras appear, fullscreen / 1 / 2 / 3 work, ROI still controls the correct YOLO crop.
+3. Confirm both cameras appear, fullscreen / 1 / 2 / 3 work, and use left-drag ROI, right-drag pan, wheel zoom and double-left-click ROI reset on both camera feeds.
 4. Unplug/reconnect the network temporarily and observe the stream STALE / NO SIGNAL overlay, then recovery.
 5. Toggle Diagnostics to view the original binary strip; check that CRC errors visibly flag it.
 6. Verify average and p95 units, signed instantaneous vs smoothed skew, and graph Delay/Skew, Pause, sample-window selector and hover.
@@ -120,3 +120,18 @@ Use the same Python 3.12 environment and run `python client/stereo_vision_client
 - The LEFT CAMERA and RIGHT CAMERA header bands, and the Diagnostics header containing the CRC Valid / Invalid / Lost summary, now use the **raised-surface** color, border and radius from `client/theme.py`, matching the Expand view button. This avoids the sharp black-background transition.
 
 Recheck both-camera and single-camera layouts, Diagnostics collapse/expand and keyboard shortcuts after updating the branch.
+
+## Mouse-only camera navigation (no ROI buttons)
+
+All Select ROI and Reset ROI buttons are removed. The camera image is interactive immediately; no selection mode is required:
+
+| Gesture | Action |
+|---|---|
+| **Left-click and drag** | Draw a new ROI in that camera; replaces its previous ROI and updates the YOLO worker's ROI |
+| **Right-click and drag** | Pan the image view; does not change ROI coordinates or YOLO crop |
+| **Double left-click** | Clear the ROI and return YOLO detection to that camera's **full frame**; does not reset zoom |
+| **Mouse wheel** | Zoom in/out around the pointer in PyQtGraph; does not modify image-space ROI coordinates |
+
+The ROI rectangle is now a passive, non-movable graphic overlay rather than a draggable `pg.RectROI`; this prevents mouse gestures from conflicting with the requested controls. The ROI coordinate text stays in the camera header. The two camera panels have independent ROIs and independent zoom/pan view transforms. The existing streaming, timestamp, time sync, and YOLO inference implementations are unchanged.
+
+Test both camera views with and without YOLO, then select a new ROI while zoomed in and confirm the coordinates refer to the original source pixels. Double-click inside the image to clear the ROI; verify the view stays zoomed until manually zoomed out. Recheck the independent right-camera ROI separately.
