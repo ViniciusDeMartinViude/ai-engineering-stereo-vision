@@ -44,7 +44,7 @@ def format_three_digits(milliseconds):
         digits = f'{rounded:03d}'
         # For 0.125, exponent=-1 -> decimal before first digit.
         decimal_position = exponent + 1
-        return digits, decimal_position, sign, unit
+        return digits, (None if decimal_position == 3 else decimal_position), sign, unit
     return '999', 3, sign, unit
 
 
@@ -61,7 +61,7 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
     def __init__(self, title, color='#63edba', parent=None):
         super().__init__(parent)
         self.setObjectName('sevenSegmentInstrument')
-        self.setMinimumSize(220, 148)
+        self.setMinimumSize(165, 92)
         self.title = title
         self.color = QtGui.QColor(color)
         self.digits = '---'
@@ -84,13 +84,13 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         p.setPen(QtGui.QColor('#aebfd5'))
         font = QtGui.QFont('Segoe UI', 10, QtGui.QFont.Weight.DemiBold)
         p.setFont(font)
-        p.drawText(QtCore.QRectF(13, 8, bounds.width()-26, 25),
+        p.drawText(QtCore.QRectF(7, 3, bounds.width()-14, 22),
                    QtCore.Qt.AlignmentFlag.AlignLeft, self.title)
 
         # Draw on a normalized coordinate system so proportions remain readable
         # as the bottom dock is resized.
-        area = QtCore.QRectF(11, 37, max(20, bounds.width()-22),
-                             max(30, bounds.height()-45))
+        area = QtCore.QRectF(6, 26, max(20, bounds.width()-12),
+                             max(30, bounds.height()-30))
         scale = min(area.width()/190, area.height()/86)
         xoffset = area.left() + (area.width()-190*scale)/2
         yoffset = area.top() + (area.height()-86*scale)/2
@@ -104,7 +104,7 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         # Fixed slot layout: sign, three 43px digits, units.
         if self.sign:
             p.setBrush(active)
-            p.drawRoundedRect(QtCore.QRectF(2, 42, 13, 5), 2, 2)
+            p.drawRoundedRect(QtCore.QRectF(1, 39, 17, 6), 2, 2)
         for i, char in enumerate(self.digits):
             self._draw_digit(p, 20 + i*44, 4, char, active, inactive)
         if self.decimal is not None and 0 <= self.decimal <= 3:
