@@ -65,6 +65,17 @@ def style_sheet():
         background-color:{c['surface']}; border:1px solid {c['border']};
         border-radius:{RADIUS}px;
     }}
+    QFrame#cameraHeader, QFrame#diagnosticsHeader {{
+        background-color:{c['raised']}; border:1px solid {c['border']};
+        border-radius:{RADIUS}px;
+    }}
+    QFrame#cameraHeader QLabel, QFrame#diagnosticsHeader QLabel {{
+        background-color:transparent; border:0px;
+    }}
+    QLabel#diagnosticsSummary {{
+        background-color:transparent;
+        color:{c['secondary']}; font-size:{FONTS['caption']}px;
+    }}
     QFrame#instrumentCard {{
         background-color:{c['surface']}; border:1px solid {c['border']};
         border-radius:{RADIUS}px;
