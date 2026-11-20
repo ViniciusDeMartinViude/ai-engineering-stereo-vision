@@ -392,7 +392,9 @@ class Studio(QtWidgets.QMainWindow):
         brand.setObjectName('appTitle')
         header.addWidget(brand)
         header.addStretch()
-        self.image_button = QtWidgets.QPushButton('☷ Image adjustments')
+        self.image_button = QtWidgets.QPushButton(
+            '☷ Image adjustments ●' if self._image_lut is not None
+            else '☷ Image adjustments')
         self.image_button.setToolTip(
             'Adjust client-only exposure, brightness, contrast and white balance '
             'for the displayed video and YOLO inputs')
