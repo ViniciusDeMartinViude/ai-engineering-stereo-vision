@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import collections
 import concurrent.futures
+import dataclasses
 import sys
 import time
 from pathlib import Path
@@ -25,13 +26,17 @@ import pyqtgraph as pg
 
 from receiver import StreamReceiver
 from stamp_protocol import decode_strip, iso_utc, split_stereo, video_height
-from yolo_detector import YoloState, YoloWorker
+from yolo_detector import Detection, YoloState, YoloWorker
 from lan_ntp import measure_ntp_offset
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
 from image_adjustments import (
     ImageAdjustmentsDialog, ImageSettings, build_lut,
     apply_to_stereo_frame, load_settings, save_settings,
+)
+from detection_annotations import (
+    PRESETS, AnnotationOptions, AnnotationPopover, format_detection_label,
+    load_annotation_options, next_preset, preset_of, save_annotation_options,
 )
 from icons import icon, pixmap
 from theme import (COLORS, THRESHOLDS, apply_theme, class_color, display_font,
@@ -308,6 +313,13 @@ class CameraPanel(QtWidgets.QFrame):
         self.vbox.addItem(self.image_item)
         self.box_items = []
         self.box_labels = []
+        self.annotations = AnnotationOptions()
+        self._last_detections = ()
+        # Centre crosshairs keep a constant on-screen size at any zoom.
+        self.center_markers = pg.ScatterPlotItem(pxMode=True)
+        self.center_markers.setZValue(23)
+        self.vbox.addItem(self.center_markers, ignoreBounds=True)
+        self.center_markers.setVisible(False)
         # Outside-ROI shading makes it obvious what YOLO does NOT look at.
         self.roi_mask = QtWidgets.QGraphicsPathItem()
         self.roi_mask.setBrush(pg.mkBrush(0, 0, 0, 125))
@@ -513,7 +525,7 @@ class CameraPanel(QtWidgets.QFrame):
         self.stale_cover.setVisible(stale and self._has_image)
         if stale:
             # Detections on a frozen frame would be misleading on a moving belt.
-            for item in self.box_items + self.box_labels:
+            for item in self.box_items + self.box_labels + [self.center_markers]:
                 item.setVisible(False)
         if age_s is None and not self._has_image:
             self.overlay.show_state('info', '◌', 'Waiting for video', self._waiting_text)
@@ -535,9 +547,24 @@ class CameraPanel(QtWidgets.QFrame):
             if len(previous) != len(label):
                 self._fit_header()
 
+    def _data_per_pixel(self):
+        """Image pixels per screen pixel at the current zoom (0 before the view exists)."""
+        try:
+            return self.vbox.viewPixelSize()[0]
+        except (TypeError, AttributeError, ZeroDivisionError):
+            return 0.0
+
+    def set_annotation_options(self, options: AnnotationOptions):
+        """Redraw the latest detections at once, without waiting for a new frame."""
+        self.annotations = options
+        self.set_detections(self._last_detections)
+
     def set_detections(self, detections):
+        self._last_detections = tuple(detections)
+        options = self.annotations
         selected = [] if self._stale else [d for d in detections if d.side == self.side]
-        while len(self.box_items) < len(selected):
+        drawn = selected if options.show else []
+        while len(self.box_items) < len(drawn):
             rect = QtWidgets.QGraphicsRectItem()
             rect.setZValue(21)
             rect.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
@@ -549,29 +576,47 @@ class CameraPanel(QtWidgets.QFrame):
             label.setZValue(22)
             self.vbox.addItem(label, ignoreBounds=True)
             self.box_labels.append(label)
-        h = self.native_shape[1]
+        w, h = self.native_shape
+        data_per_pixel = self._data_per_pixel()
         for i, rect in enumerate(self.box_items):
-            visible = i < len(selected)
-            rect.setVisible(visible)
-            self.box_labels[i].setVisible(visible)
-            if visible:
-                d = selected[i]
-                color = class_color(d.label)
-                x1, y1, x2, y2 = d.xyxy
-                rect.setPen(pg.mkPen(color, width=2.5))
-                rect.setRect(x1, y1, max(1, x2-x1), max(1, y2-y1))
-                label = self.box_labels[i]
+            label = self.box_labels[i]
+            if i >= len(drawn):
+                rect.setVisible(False)
+                label.setVisible(False)
+                continue
+            d = drawn[i]
+            color = class_color(d.label)
+            x1, y1, x2, y2 = d.xyxy
+            rect.setPen(pg.mkPen(color, width=2.5))
+            rect.setRect(x1, y1, max(1, x2-x1), max(1, y2-y1))
+            rect.setVisible(True)
+            text = format_detection_label(d, options)
+            label.setVisible(bool(text))
+            if text:
                 label.fill = pg.mkBrush(color)
-                label.setText(f' {d.label} {d.confidence:.0%} ')
-                label.setAnchor((0, 1) if y1 > 0.04 * h else (0, 0))
-                label.setPos(x1, y1)
+                label.setText('\n'.join(f' {line} ' for line in text.split('\n')))
+                # Labels keep a fixed on-screen size; if one would run past the
+                # image's right edge, align it to the box's right edge instead.
+                label_w = label.textItem.boundingRect().width() * data_per_pixel
+                flip = x1 + label_w > w and x2 - label_w >= 0
+                label.setAnchor((1 if flip else 0, 1 if y1 > 0.04 * h else 0))
+                label.setPos(x2 if flip else x1, y1)
+        if options.center_marker and drawn:
+            self.center_markers.setData(
+                pos=[d.center for d in drawn], symbol='crosshair', size=17,
+                pen=pg.mkPen(COLORS['background'], width=1),
+                brush=[pg.mkBrush(class_color(d.label)) for d in drawn])
+            self.center_markers.setVisible(True)
+        elif self.center_markers.isVisible():
+            self.center_markers.setVisible(False)
         count = len(selected)
         text = 'No objects' if not count else ('1 object' if count == 1 else f'{count} objects')
         if self.detect_count.text() != text:
             self.detect_count.setText(text)
             classes = collections.Counter(d.label for d in selected)
-            self.detect_count.setToolTip('\n'.join(f'{name} × {n}' for name, n in classes.most_common())
-                                         or 'No detections in the latest result')
+            breakdown = '\n'.join(f'{name} × {n}' for name, n in classes.most_common())
+            self.detect_count.setToolTip((breakdown or 'No detections in the latest result')
+                                         + '\n\nLabel details: Labels button or shortcut L')
             set_state(self.detect_count, 'active' if count else '')
             self._fit_header()
 
@@ -612,10 +657,13 @@ class Studio(QtWidgets.QMainWindow):
         self.last_packet_mono = time.monotonic()
         self.packet_rate = 0.0
         self.recv_fps = 0.0
-        self._image_preferences = QtCore.QSettings('AIEngineering', 'StereoVisionStudio')
-        self.image_settings = load_settings(self._image_preferences)
+        # Per-workstation preferences: image adjustments and detection labels.
+        self._preferences = QtCore.QSettings('AIEngineering', 'StereoVisionStudio')
+        self.image_settings = load_settings(self._preferences)
         self._image_lut = build_lut(self.image_settings)
         self.image_dialog = None
+        self.annotation_options = load_annotation_options(self._preferences)
+        self.annotation_popover = None
         # The raw, signed R-L skew remains unchanged in stats/logs.
         # The instrument uses a 1.5-second time-based EMA.
         self.skew_smoother = ExponentialSmoother(time_constant_seconds=1.5)
@@ -652,6 +700,7 @@ class Studio(QtWidgets.QMainWindow):
         bar = QtWidgets.QFrame()
         bar.setObjectName('appBar')
         bar.setFixedHeight(56)
+        self.app_bar = bar
         row = QtWidgets.QHBoxLayout(bar)
         row.setContentsMargins(16, 0, 12, 0)
         row.setSpacing(8)
@@ -685,11 +734,22 @@ class Studio(QtWidgets.QMainWindow):
             chip.clicked.connect(lambda: self.analysis.show_tab('diagnostics'))
             row.addWidget(chip)
         row.addStretch()
+        self.labels_button = QtWidgets.QPushButton('Labels')
+        self.labels_button.setIcon(icon('tag', COLORS['secondary']))
         self.image_button = QtWidgets.QPushButton('Adjust image')
-        self.image_button.setFont(ui_font(13, QtGui.QFont.Weight.DemiBold))
-        self.image_button.setIconSize(QtCore.QSize(16, 16))
-        self.image_button.setFixedHeight(32)
+        for button in (self.labels_button, self.image_button):
+            button.setFont(ui_font(13, QtGui.QFont.Weight.DemiBold))
+            button.setIconSize(QtCore.QSize(16, 16))
+            button.setFixedHeight(32)
+        self.labels_button.clicked.connect(self._toggle_annotation_popover)
         self.image_button.clicked.connect(self._toggle_image_dialog)
+        if self.args.yolo_model:
+            self.labels_button.setToolTip('What detection labels show: class, ID, confidence, '
+                                          'centre, size · shortcut L cycles presets')
+        else:
+            self.labels_button.setEnabled(False)
+            self.labels_button.setToolTip('Detection labels · start with --yolo-model to enable')
+        row.addWidget(self.labels_button)
         self.fullscreen_button = QtWidgets.QToolButton()
         self.fullscreen_button.setIconSize(QtCore.QSize(16, 16))
         self.fullscreen_button.setFixedSize(32, 32)
@@ -722,6 +782,7 @@ class Studio(QtWidgets.QMainWindow):
             panel.view_requested.connect(self.change_view)
             panel.set_waiting_text(self._listen_text())
             panel.set_detections_enabled(bool(self.args.yolo_model))
+            panel.set_annotation_options(self.annotation_options)
             self.cameras.addWidget(panel)
         self.cameras.setSizes([700, 700])
         self.cameras.splitterMoved.connect(self._schedule_layout)
@@ -776,7 +837,8 @@ class Studio(QtWidgets.QMainWindow):
                      ('F', self.toggle_fullscreen),
                      ('Escape', self.showMaximized),
                      ('D', self.analysis.toggle_diagnostics),
-                     ('P', self.analysis.toggle_pause)]
+                     ('P', self.analysis.toggle_pause),
+                     ('L', self._cycle_annotation_preset)]
         for key, action in shortcuts:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(action)
@@ -808,28 +870,57 @@ class Studio(QtWidgets.QMainWindow):
         self.image_dialog.raise_()
         # Position once; preserve the operator's dragged position thereafter.
         if first_show:
-            self._place_image_dialog()
+            self._place_under(self.image_dialog, self.image_button)
 
-    def _place_image_dialog(self):
-        """Open under the Adjust image button, kept fully inside window and screen."""
-        dialog = self.image_dialog
-        dialog.adjustSize()
-        size = dialog.size()
-        anchor = self.image_button.mapToGlobal(
-            QtCore.QPoint(self.image_button.width(), self.image_button.height() + 6))
+    def _place_under(self, popup, button):
+        """Open a floating panel under its button, kept fully inside window and screen."""
+        popup.adjustSize()
+        size = popup.size()
+        anchor = button.mapToGlobal(QtCore.QPoint(button.width(), button.height() + 6))
         bounds = self.frameGeometry()
         screen = self.screen()
         if screen is not None:
             bounds = bounds.intersected(screen.availableGeometry())
-        x = min(anchor.x() - size.width() + 6, bounds.right() - size.width())
-        y = min(anchor.y(), bounds.bottom() - size.height())
-        dialog.move(max(bounds.left(), x), max(bounds.top(), y))
+        x = min(anchor.x() - size.width() + 16, bounds.right() - size.width())
+        y = min(anchor.y() - 10, bounds.bottom() - size.height())
+        popup.move(max(bounds.left(), x), max(bounds.top(), y))
+
+    def _toggle_annotation_popover(self):
+        """Detection label options; a popup that closes on any outside click or Esc."""
+        if self.annotation_popover is None:
+            self.annotation_popover = AnnotationPopover(self.annotation_options, self)
+            self.annotation_popover.changed.connect(self._apply_annotation_options)
+        if self.annotation_popover.isVisible():
+            self.annotation_popover.close()
+            return
+        self.annotation_popover.set_options(self.annotation_options)
+        self._place_under(self.annotation_popover, self.labels_button)
+        self.annotation_popover.show()
+
+    def _apply_annotation_options(self, options, save=True):
+        self.annotation_options = options
+        for panel in (self.left_panel, self.right_panel):
+            panel.set_annotation_options(options)
+        if save:
+            save_annotation_options(self._preferences, options)
+
+    def _cycle_annotation_preset(self):
+        """Shortcut L: Minimal → Standard → Detailed, with brief on-screen feedback."""
+        if not self.yolo:
+            return
+        name = next_preset(self.annotation_options)
+        self._apply_annotation_options(PRESETS[name])
+        if self.annotation_popover is not None and self.annotation_popover.isVisible():
+            self.annotation_popover.set_options(self.annotation_options)
+        button = self.labels_button
+        QtWidgets.QToolTip.showText(button.mapToGlobal(QtCore.QPoint(0, button.height() + 4)),
+                                    f'Labels: {name.title()}', button, QtCore.QRect(), 1500)
 
     def _image_settings_changed(self, settings: ImageSettings):
         """Rebuild tiny per-channel lookup tables only on slider changes."""
         self.image_settings = settings
         self._image_lut = build_lut(settings)
-        save_settings(self._image_preferences, settings)
+        save_settings(self._preferences, settings)
         self._set_image_button_active(self._image_lut is not None)
 
     def toggle_fullscreen(self):
@@ -864,8 +955,19 @@ class Studio(QtWidgets.QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.brand_text.setVisible(self.width() >= 1200)
+        self._fit_app_bar()
         self._schedule_layout()
+
+    def _fit_app_bar(self):
+        """Narrow windows: hide the brand text first, then show the actions as icons."""
+        layout = self.app_bar.layout()
+        for show_brand, button_text in ((True, True), (False, True), (False, False)):
+            self.brand_text.setVisible(show_brand)
+            for button, text in ((self.labels_button, 'Labels'), (self.image_button, 'Adjust image')):
+                button.setText(text if button_text else '')
+            layout.invalidate()
+            if layout.minimumSize().width() <= self.width():
+                break
 
     def _fit_layout(self):
         """Give the cameras the height their aspect ratio can use and the rest
@@ -1372,7 +1474,32 @@ def self_test():
     control._sliders['tint'].setValue(-30)
     control._reset_slider('tint')
     assert control.settings.tint == 0
-    print('PASS: Qt control-room, ROI, timing and client-only image adjustments')
+    # Detection label options: text per preset, custom mixes, drawing and hiding.
+    det = Detection('LEFT', 'box', 0.94, (100.0, 50.0, 300.0, 190.0), 2)
+    assert det.center == (200.0, 120.0)
+    assert format_detection_label(det, PRESETS['minimal']) == 'box'
+    assert format_detection_label(det, PRESETS['standard']) == 'box · 94%'
+    assert format_detection_label(det, PRESETS['detailed']) == 'box · id 2 · 94%\n(200, 120) · 200×140 px'
+    assert format_detection_label(det, AnnotationOptions(class_name=False, confidence=False)) == ''
+    assert preset_of(PRESETS['detailed']) == 'detailed'
+    assert preset_of(dataclasses.replace(PRESETS['standard'], class_id=True)) is None
+    assert next_preset(PRESETS['detailed']) == 'minimal'
+    panel.set_annotation_options(PRESETS['detailed'])
+    panel.set_detections([det])
+    assert '(200, 120)' in panel.box_labels[0].textItem.toPlainText()
+    assert panel.box_items[0].isVisible() and panel.center_markers.isVisible()
+    panel.set_annotation_options(dataclasses.replace(PRESETS['detailed'], show=False))
+    assert not panel.box_items[0].isVisible() and not panel.center_markers.isVisible()
+    assert panel.detect_count.text() == '1 object', 'counts keep updating while hidden'
+    popover = AnnotationPopover(PRESETS['standard'])
+    emitted = []
+    popover.changed.connect(emitted.append)
+    popover._switches['class_id'].setChecked(True)
+    assert emitted[-1].class_id and popover.presets.current is None
+    assert popover.custom_note.isVisibleTo(popover)
+    popover.presets.select('minimal')
+    assert emitted[-1] == PRESETS['minimal'] and not popover._switches['confidence'].isChecked()
+    print('PASS: Qt control-room, ROI, timing, image adjustments and detection labels')
     return 0
 
 

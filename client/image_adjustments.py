@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from control_room_widgets import ToggleSwitch
 from icons import icon, pixmap
 from theme import COLORS, display_font, numeric_font, ui_font
 
@@ -105,39 +106,6 @@ class DraggablePanelHeader(QtWidgets.QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
-
-
-class ToggleSwitch(QtWidgets.QCheckBox):
-    """A QCheckBox drawn as an on/off switch (same signals and API)."""
-
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-
-    def sizeHint(self):
-        metrics = self.fontMetrics()
-        return QtCore.QSize(50 + metrics.horizontalAdvance(self.text()), max(24, metrics.height() + 6))
-
-    def hitButton(self, pos):
-        return self.rect().contains(pos)
-
-    def paintEvent(self, event):
-        p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-        on = self.isChecked()
-        track = QtCore.QRectF(0.5, (self.height() - 20) / 2 + 0.5, 38, 20)
-        p.setPen(QtCore.Qt.PenStyle.NoPen if on else QtGui.QPen(QtGui.QColor(COLORS["border_strong"]), 1))
-        p.setBrush(QtGui.QColor(COLORS["accent"] if on else COLORS["raised"]))
-        p.drawRoundedRect(track, 10, 10)
-        knob_x = track.right() - 17 if on else track.left() + 3
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.setBrush(QtGui.QColor(COLORS["background"] if on else COLORS["secondary"]))
-        p.drawEllipse(QtCore.QRectF(knob_x, track.top() + 3, 14, 14))
-        p.setPen(self.palette().color(QtGui.QPalette.ColorRole.WindowText))
-        p.setFont(self.font())
-        p.drawText(QtCore.QRectF(50, 0, self.width() - 50, self.height()),
-                   QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, self.text())
-        p.end()
 
 
 class ImageAdjustmentsDialog(QtWidgets.QDialog):

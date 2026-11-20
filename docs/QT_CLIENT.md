@@ -97,12 +97,12 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - App-bar status pills for **Stream, Clock, YOLO and Data integrity**; click any pill for Diagnostics
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
 - Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
-- Latest-frame asynchronous YOLO predictions with per-class colours, class names and confidence on both cameras
+- Latest-frame asynchronous YOLO predictions with per-class colours on both cameras; **Labels** options show class name, class ID, confidence, box centre (x, y), box size and a centre marker (presets Minimal / Standard / Detailed)
 - KPI readouts (average delay, P95, smoothed skew) coloured by provisional thresholds; greyed as *Stale* when frames stop
 - Delay/skew history with threshold bands, mean line and hover readout; Diagnostics with the field-annotated 168-bit CRC16 barcode
 - Original incoming frames unchanged; client-only image adjustments affect display and YOLO input only
 
-Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause chart.
+Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause chart, `L` cycle label presets.
 
 ## Technical details
 

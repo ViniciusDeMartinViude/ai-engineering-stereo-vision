@@ -269,11 +269,12 @@ def style_sheet():
 
     /* Floating image adjustment panel */
     QDialog {{ background-color:transparent; }}
-    QFrame#imageAdjustmentsPanel {{
+    QFrame#imageAdjustmentsPanel, QFrame#popoverCard {{
         background-color:rgba(18, 26, 35, 242);
         border:1px solid {c['border_strong']}; border-radius:12px;
     }}
-    QFrame#imageAdjustmentsPanel QLabel, QFrame#imageAdjustmentsPanel QCheckBox {{
+    QFrame#imageAdjustmentsPanel QLabel, QFrame#imageAdjustmentsPanel QCheckBox,
+    QFrame#popoverCard QCheckBox {{
         background:transparent;
     }}
     QFrame#divider {{ background-color:{c['border']}; border:0px; max-height:1px; }}

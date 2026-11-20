@@ -28,6 +28,12 @@ class Detection:
     label: str
     confidence: float
     xyxy: tuple  # pixel coordinates within one source camera image
+    class_id: int = -1  # model class index; -1 when unknown
+
+    @property
+    def center(self):
+        x1, y1, x2, y2 = self.xyxy
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
 
 class YoloWorker:
@@ -181,5 +187,5 @@ class YoloWorker:
                 coords = (float(coords[0]) + origin_x, float(coords[1]) + origin_y,
                           float(coords[2]) + origin_x, float(coords[3]) + origin_y)
                 name = names.get(cls, str(cls)) if isinstance(names, dict) else names[cls]
-                found.append(Detection(side, str(name), conf, coords))
+                found.append(Detection(side, str(name), conf, coords, cls))
         return found, inference_ms

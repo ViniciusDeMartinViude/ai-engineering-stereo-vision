@@ -216,7 +216,7 @@ Opens under its button and always stays inside the window/screen. Controls are g
 
 ### Keyboard
 
-`1` both · `2` left · `3` right · `F` full screen · `Esc` maximized · **`D` toggle Diagnostics** (new) · **`P` pause chart** (new).
+`1` both · `2` left · `3` right · `F` full screen · `Esc` maximized · **`D` toggle Diagnostics** (new) · **`P` pause chart** (new) · **`L` cycle label presets** (new, see Detection labels below).
 
 ### Verify on the receiver
 
@@ -228,3 +228,29 @@ Opens under its button and always stays inside the window/screen. Controls are g
 6. Press `D`: barcode fields decode, CRC shows *valid*, counters match. Press `P` and hover the chart.
 7. Repeat at 1366×768 and with Windows scaling at 125 %/150 %; capture screenshots if anything clips.
 8. Compare receiver FPS and delay against the previous build on the same LAN; the per-frame path is unchanged apart from detection colouring.
+
+## Detection labels (annotation detail options)
+
+The app bar's **Labels** button (shortcut **`L`** cycles the presets) opens a popover that controls what each YOLO detection shows on the video. Changes apply immediately to both cameras and are saved per workstation, like the image adjustments.
+
+| Option | Shows | Example |
+|---|---|---|
+| Class name | Model class name | `box` |
+| Class ID | Numeric class index from the model | `id 0` |
+| Confidence | Detection confidence | `94%` |
+| Center (x, y) | Box centre in native camera pixels, origin top-left | `(812, 455)` |
+| Box size (w × h) | Box width × height in native camera pixels | `190×140 px` |
+| Center marker | Crosshair at each box centre (constant on-screen size at any zoom) | ⊕ |
+| Show detections | Master switch to inspect the raw image; object counts keep updating | |
+
+Presets: **Minimal** (class name), **Standard** (class name + confidence, the default) and **Detailed** (all of the above). Any other combination shows as **Custom**. Labels put identity on the first line and geometry on the second, e.g. `box · id 0 · 94%` / `(812, 455) · 190×140 px`; a live preview in the popover shows the current format. Labels that would run past the image's right edge align to their box's right edge instead.
+
+Centre and size use the same native camera pixel space as the ROI (YOLO crop offsets are already removed), so they can be compared directly with ROI coordinates. They describe the detection box, not a calibrated 3-D position.
+
+### Verify
+
+1. `python client/stereo_vision_client_qt.py --self-test` (checks label text for each preset, Custom detection, centre markers and hiding).
+2. With YOLO running, press `L` three times: labels cycle Minimal → Standard → Detailed and a "Labels: …" tip confirms each step.
+3. Open **Labels**, switch **Center (x, y)** on, and compare a label's centre with the ROI header for a box you know; zoom in and check that labels and centre markers keep their screen size.
+4. Turn **Show detections** off: boxes, labels and markers disappear while the camera headers still count objects.
+5. Restart the client: the last label options are restored.

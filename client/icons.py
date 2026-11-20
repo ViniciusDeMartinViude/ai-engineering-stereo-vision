@@ -61,6 +61,14 @@ def _pulse(p):
     p.drawPolyline([_P(1, 8.5), _P(4.5, 8.5), _P(6.5, 3), _P(9.5, 13), _P(11.5, 8.5), _P(15, 8.5)])
 
 
+def _tag(p):
+    p.drawPolygon(QtGui.QPolygonF([_P(2.5, 2.5), _P(8.5, 2.5), _P(14, 8), _P(8, 14), _P(2.5, 8.5)]))
+    p.save()
+    p.setBrush(p.pen().color())
+    p.drawEllipse(_P(5.6, 5.6), 1.2, 1.2)
+    p.restore()
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -83,6 +91,7 @@ _PAINTERS = {
     "play": _play,
     "sliders": _sliders,
     "pulse": _pulse,
+    "tag": _tag,
     "logo": _logo,
 }
 

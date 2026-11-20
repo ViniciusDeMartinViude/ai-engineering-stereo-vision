@@ -138,6 +138,44 @@ class StatusChip(QtWidgets.QAbstractButton):
         p.restore()
 
 
+class ToggleSwitch(QtWidgets.QCheckBox):
+    """A QCheckBox drawn as an on/off switch (same signals and API)."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self):
+        metrics = self.fontMetrics()
+        return QtCore.QSize(50 + metrics.horizontalAdvance(self.text()), max(24, metrics.height() + 6))
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        on = self.isChecked()
+        enabled = self.isEnabled()
+        track = QtCore.QRectF(0.5, (self.height() - 20) / 2 + 0.5, 38, 20)
+        p.setPen(QtCore.Qt.PenStyle.NoPen if on else QtGui.QPen(QtGui.QColor(COLORS["border_strong"]), 1))
+        if on:
+            p.setBrush(QtGui.QColor(COLORS["accent"] if enabled else COLORS["border_strong"]))
+        else:
+            p.setBrush(QtGui.QColor(COLORS["raised"]))
+        p.drawRoundedRect(track, 10, 10)
+        knob_x = track.right() - 17 if on else track.left() + 3
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(QtGui.QColor(COLORS["background"] if on else
+                                (COLORS["secondary"] if enabled else COLORS["border_strong"])))
+        p.drawEllipse(QtCore.QRectF(knob_x, track.top() + 3, 14, 14))
+        p.setPen(QtGui.QColor(COLORS["text"] if enabled else COLORS["muted"]))
+        p.setFont(self.font())
+        p.drawText(QtCore.QRectF(50, 0, self.width() - 50, self.height()),
+                   QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, self.text())
+        p.end()
+
+
 class SegmentedControl(QtWidgets.QFrame):
     """Exclusive option selector used for tabs, view modes and sample windows."""
     selected = QtCore.Signal(str)
@@ -180,6 +218,14 @@ class SegmentedControl(QtWidgets.QFrame):
             self.buttons[key].setChecked(True)
         if emit:
             self.selected.emit(key)
+
+    def clear_selection(self):
+        """Show no option as selected (e.g. a custom mix that matches no preset)."""
+        self.current = None
+        self.group.setExclusive(False)
+        for button in self.buttons.values():
+            button.setChecked(False)
+        self.group.setExclusive(True)
 
 
 class MetricField(QtWidgets.QWidget):
