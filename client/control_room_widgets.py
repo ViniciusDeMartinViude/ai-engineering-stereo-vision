@@ -1,12 +1,18 @@
-"""Reusable lightweight Qt monitoring widgets (no heavy dependencies)."""
+"""Reusable control-room widgets: status pills, KPI tiles, history chart, diagnostics.
+
+Lightweight (Qt + PyQtGraph only) and driven by the 10 Hz presentation timer.
+"""
 from __future__ import annotations
 
-import math
 from PySide6 import QtCore, QtGui, QtWidgets
 import numpy as np
 import pyqtgraph as pg
-from theme import COLORS, FONT_NUMERIC, FONT_UI, FONTS, THRESHOLDS
+
+from icons import icon
 from seven_segment import SevenSegmentDisplay
+from stamp_protocol import extract_strip
+from theme import (COLORS, STATE_COLORS, STATE_MARKS, STATE_WORDS, THRESHOLDS,
+                   display_font, numeric_font, tint, ui_font)
 
 
 def set_state(widget, state):
@@ -19,290 +25,497 @@ def set_state(widget, state):
     widget.update()
 
 
-class StatusChip(QtWidgets.QLabel):
-    """Text + shape/label conveys a state without relying solely on color."""
-    def __init__(self, label: str, parent=None):
+def overline(text, parent=None, size=11):
+    label = QtWidgets.QLabel(text, parent)
+    label.setObjectName('overline')
+    label.setFont(display_font(size))
+    return label
+
+
+class StatusChip(QtWidgets.QAbstractButton):
+    """App-bar status pill: state mark + title + short message.
+
+    State is carried by the mark shape and the message text as well as by
+    colour. Details live in the tooltip so the pill stays short and its width
+    does not jitter as values change.
+    """
+    def __init__(self, label: str, parent=None, min_width=150):
         super().__init__(parent)
         self.title = label
-        self.setObjectName('statusChip')
-        self.setText(f'○ {label}: WAITING')
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+        self.state = 'neutral'
+        self.message = 'Waiting'
+        self._min_width = min_width
+        self._clickable = False
+        self._title_font = display_font(11)
+        self._message_font = ui_font(13, QtGui.QFont.Weight.DemiBold)
+        self.setText(f'{label}: {self.message}')
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
                            QtWidgets.QSizePolicy.Policy.Fixed)
-        set_state(self, 'neutral')
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
 
-    def display(self, state: str, message: str):
-        mark = {'good':'●', 'warning':'▲', 'bad':'✕',
-                'info':'◆', 'neutral':'○'}.get(state, '○')
-        value = f'{mark} {self.title}: {message}'
-        if self.text() != value:
-            self.setText(value)
-        set_state(self, state)
+    def set_clickable(self, clickable=True):
+        self._clickable = clickable
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor if clickable
+                       else QtCore.Qt.CursorShape.ArrowCursor)
+
+    def display(self, state: str, message: str, detail: str | None = None):
+        changed = (state, message) != (self.state, self.message)
+        self.state, self.message = state, message
+        text = f'{self.title}: {message}'
+        if self.text() != text:
+            self.setText(text)
+        if detail is not None and detail != self.toolTip():
+            self.setToolTip(detail)
+        if changed:
+            self.updateGeometry()
+            self.update()
+
+    def sizeHint(self):
+        title_w = QtGui.QFontMetrics(self._title_font).horizontalAdvance(self.title.upper())
+        message_w = QtGui.QFontMetrics(self._message_font).horizontalAdvance(self.message)
+        return QtCore.QSize(max(self._min_width, 28 + title_w + 8 + message_w + 14), 30)
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        rect = QtCore.QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = rect.height() / 2
+        color = QtGui.QColor(STATE_COLORS.get(self.state, COLORS['neutral']))
+        neutral = self.state == 'neutral'
+        hovered = self._clickable and self.underMouse()
+        p.setPen(QtGui.QPen(QtGui.QColor(COLORS['border']) if neutral else tint(color, 110), 1))
+        p.setBrush(QtGui.QColor(COLORS['hover'] if hovered else COLORS['raised']))
+        p.drawRoundedRect(rect, radius, radius)
+        if not neutral:
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(tint(color, 30))
+            p.drawRoundedRect(rect, radius, radius)
+        self._paint_mark(p, 15.0, rect.center().y(), color)
+        title = self.title.upper()
+        x = 27.0
+        p.setFont(self._title_font)
+        p.setPen(QtGui.QColor(COLORS['secondary']))
+        title_w = QtGui.QFontMetrics(self._title_font).horizontalAdvance(title)
+        p.drawText(QtCore.QRectF(x, 0, title_w + 4, self.height()),
+                   QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, title)
+        x += title_w + 8
+        p.setFont(self._message_font)
+        p.setPen(QtGui.QColor(COLORS['text']))
+        room = max(10, int(self.width() - x - 12))
+        message = QtGui.QFontMetrics(self._message_font).elidedText(
+            self.message, QtCore.Qt.TextElideMode.ElideRight, room)
+        p.drawText(QtCore.QRectF(x, 0, room, self.height()),
+                   QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft, message)
+        p.end()
+
+    def _paint_mark(self, p, cx, cy, color):
+        p.save()
+        if self.state == 'good':
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(QtCore.QPointF(cx, cy), 4, 4)
+        elif self.state == 'warning':
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(cx, cy - 4.5), QtCore.QPointF(cx + 5, cy + 4),
+                                           QtCore.QPointF(cx - 5, cy + 4)]))
+        elif self.state == 'bad':
+            pen = QtGui.QPen(color, 2.2)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QtCore.QPointF(cx - 3.5, cy - 3.5), QtCore.QPointF(cx + 3.5, cy + 3.5))
+            p.drawLine(QtCore.QPointF(cx + 3.5, cy - 3.5), QtCore.QPointF(cx - 3.5, cy + 3.5))
+        elif self.state == 'info':
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(cx, cy - 4.5), QtCore.QPointF(cx + 4.5, cy),
+                                           QtCore.QPointF(cx, cy + 4.5), QtCore.QPointF(cx - 4.5, cy)]))
+        else:
+            p.setPen(QtGui.QPen(color, 1.6))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QtCore.QPointF(cx, cy), 3.5, 3.5)
+        p.restore()
 
 
-class SegmentedControl(QtWidgets.QWidget):
-    """Exclusive view selector that retains original 1/2/3 shortcuts."""
+class SegmentedControl(QtWidgets.QFrame):
+    """Exclusive option selector used for tabs, view modes and sample windows."""
     selected = QtCore.Signal(str)
+    VIEW_OPTIONS = (('both', 'Both cameras', 'View both cameras · shortcut 1'),
+                    ('left', 'Left camera', 'View the left camera · shortcut 2'),
+                    ('right', 'Right camera', 'View the right camera · shortcut 3'))
 
-    def __init__(self, parent=None):
+    def __init__(self, options=VIEW_OPTIONS, parent=None):
         super().__init__(parent)
+        self.setObjectName('segmented')
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
+        layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
         self.group = QtWidgets.QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons = {}
-        for mode, text, shortcut in [('both','Both cameras','1'),
-                                     ('left','Left camera','2'),
-                                     ('right','Right camera','3')]:
+        self.current = None
+        for key, text, tooltip in options:
             button = QtWidgets.QPushButton(text)
+            button.setObjectName('segment')
             button.setCheckable(True)
-            button.setToolTip(f'View {text.lower()} · shortcut {shortcut}')
-            button.setProperty('active', 'false')
+            button.setToolTip(tooltip)
+            button.setFont(ui_font(12, QtGui.QFont.Weight.DemiBold))
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            # Never squeeze a label below its text width.
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
+                                 QtWidgets.QSizePolicy.Policy.Fixed)
             self.group.addButton(button)
-            self.buttons[mode] = button
+            self.buttons[key] = button
             layout.addWidget(button)
-            button.clicked.connect(lambda checked=False, m=mode: self.select(m))
-        self.select('both', emit=False)
+            button.clicked.connect(lambda checked=False, k=key: self.select(k))
+        if options:
+            self.select(options[0][0], emit=False)
 
-    def select(self, mode: str, emit=True):
-        if mode not in self.buttons:
+    def select(self, key: str, emit=True):
+        if key not in self.buttons:
             return
-        for name, button in self.buttons.items():
-            new = name == mode
-            if button.isChecked() != new:
-                button.setChecked(new)
-            state = 'true' if new else 'false'
-            if button.property('active') != state:
-                button.setProperty('active', state)
-                button.style().unpolish(button)
-                button.style().polish(button)
+        self.current = key
+        if not self.buttons[key].isChecked():
+            self.buttons[key].setChecked(True)
         if emit:
-            self.selected.emit(mode)
+            self.selected.emit(key)
 
 
 class MetricField(QtWidgets.QWidget):
+    """Overline label above a monospaced value."""
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
         box = QtWidgets.QVBoxLayout(self)
-        box.setContentsMargins(4,2,4,2)
-        box.setSpacing(1)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
         self.name = QtWidgets.QLabel(label)
         self.name.setObjectName('metricLabel')
+        self.name.setFont(display_font(10.5))
         self.value = QtWidgets.QLabel('—')
         self.value.setObjectName('metricValue')
+        self.value.setFont(numeric_font(14))
+        self.value.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(self.name)
         box.addWidget(self.value)
-        self.value.setMinimumWidth(65)
-        self.value.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
-    def update_value(self, text: str):
+    def update_value(self, text: str, state: str | None = None):
         if self.value.text() != text:
             self.value.setText(text)
+        if state is not None:
+            set_state(self.value, state)
 
 
 class TelemetryBar(QtWidgets.QFrame):
-    """Aligned groups replacing the dense one-line telemetry string."""
-    def __init__(self, parent=None):
+    """Aligned grid of raw diagnostic values (label above value)."""
+    LABELS = (('crc', 'CRC VALID'), ('errors', 'INVALID / LOST'), ('sequence', 'SEQUENCE'),
+              ('left', 'LEFT UTC'), ('right', 'RIGHT UTC'), ('age', 'LAST DELAY'),
+              ('skew', 'LAST SKEW R−L'), ('offset', 'CLOCK OFFSET'), ('rtt', 'CLOCK RTT'),
+              ('sync', 'LAST SYNC'), ('packets', 'UDP PACKETS / S'), ('yolo', 'YOLO'))
+
+    def __init__(self, parent=None, columns=6):
         super().__init__(parent)
-        self.setObjectName('controlCard')
-        row = QtWidgets.QHBoxLayout(self)
-        row.setContentsMargins(8,5,8,5)
-        row.setSpacing(6)
-        labels = [('crc','CRC VALID'),('errors','INVALID / LOST'),
-                  ('left','LEFT UTC'),('right','RIGHT UTC'),
-                  ('age','LAST DELAY'),('skew','LAST SKEW R−L'),
-                  ('offset','CLOCK OFFSET'),('rtt','CLOCK RTT')]
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
         self.fields = {}
-        for i, (key,label) in enumerate(labels):
+        for i, (key, label) in enumerate(self.LABELS):
             field = MetricField(label)
             self.fields[key] = field
-            row.addWidget(field, 1 if key not in ('left','right') else 2)
-            if i in (1,3,5):
-                sep = QtWidgets.QFrame()
-                sep.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-                sep.setProperty('separator', True)
-                row.addWidget(sep)
+            grid.addWidget(field, i // columns, i % columns)
+        for column in range(columns):
+            grid.setColumnStretch(column, 1)
 
     def update_fields(self, **values):
         for key, value in values.items():
-            if key in self.fields:
+            if key not in self.fields:
+                continue
+            if isinstance(value, tuple):
+                self.fields[key].update_value(str(value[0]), value[1])
+            else:
                 self.fields[key].update_value(str(value))
 
 
 class KpiCard(QtWidgets.QFrame):
-    """Reusable metric card with clear label, window and secondary value."""
-    def __init__(self, title: str, subtitle: str = '', led_color=None, parent=None):
+    """Metric tile: overline title, state badge, seven-segment reading, context line."""
+    def __init__(self, title: str, subtitle: str = '', led_color=None, parent=None,
+                 help_text: str | None = None, max_digit_px: int = 64):
         super().__init__(parent)
-        self.setObjectName('instrumentCard')
+        self.setObjectName('kpiCard')
+        self.state = None
+        self.neutral_color = led_color or COLORS['neutral']
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(6,3,6,3)
-        layout.setSpacing(1)
-        self.setMinimumHeight(148)
-        self.setMaximumHeight(192)
-        if led_color:
-            self.readout = SevenSegmentDisplay(title, led_color)
-            self.readout.setMinimumSize(165,112)
-            self.readout.setMaximumHeight(151)
-            layout.addWidget(self.readout, 1)
-            self.label = None
-        else:
-            self.readout = None
-            label = QtWidgets.QLabel(title)
-            label.setObjectName('metricLabel')
-            layout.addWidget(label)
-            self.label = QtWidgets.QLabel('—')
-            self.label.setObjectName('metricValue')
-            self.label.setProperty('largeNumber', True)
-            layout.addWidget(self.label, 1)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(2)
+        header = QtWidgets.QHBoxLayout()
+        header.setSpacing(6)
+        self.name = overline(title)
+        self.badge = QtWidgets.QLabel()
+        self.badge.setObjectName('stateBadge')
+        self.badge.setFont(display_font(11))
+        header.addWidget(self.name)
+        header.addStretch()
+        header.addWidget(self.badge)
+        layout.addLayout(header)
+        self.readout = SevenSegmentDisplay(title, self.neutral_color, show_title=False)
+        # Digits grow with the card up to a readable cap, then stay put.
+        self.readout.max_scale = max_digit_px / 70.0
+        layout.addWidget(self.readout, 1)
+        self.label = None
         self.secondary = QtWidgets.QLabel(subtitle)
-        self.secondary.setObjectName('secondary')
-        self.secondary.setWordWrap(True)
+        self.secondary.setObjectName('caption')
+        self.secondary.setFont(ui_font(12))
         layout.addWidget(self.secondary)
+        if help_text:
+            self.setToolTip(help_text)
+        self.set_quality('neutral')
 
-    def set_value(self, value_ms=None, text=None, secondary=None):
-        if self.readout is not None:
-            self.readout.set_milliseconds(value_ms)
-        elif text is not None and self.label.text() != text:
-            self.label.setText(text)
+    def set_value(self, value_ms=None, text=None, secondary=None, state=None):
+        self.readout.set_milliseconds(value_ms)
+        if state is not None:
+            self.set_quality(state)
         if secondary is not None and secondary != self.secondary.text():
             self.secondary.setText(secondary)
 
+    def set_quality(self, state: str):
+        if state == self.state:
+            return
+        self.state = state
+        color = self.neutral_color if state == 'neutral' else STATE_COLORS.get(state, self.neutral_color)
+        self.readout.set_color(color)
+        self.badge.setText(f'{STATE_MARKS.get(state, "○")} {STATE_WORDS.get(state, "")}')
+        set_state(self.badge, state)
 
-class DiagnosticsPanel(QtWidgets.QFrame):
-    """Compact collapsed diagnostics; includes full telemetry and binary barcode."""
+
+class BarcodeView(QtWidgets.QWidget):
+    """The original 168-bit strip, enlarged with nearest-neighbour and labelled by field."""
+    FIELDS = (('magic', 'Magic', 16), ('version', 'Ver', 8), ('left', 'Left UTC', 64),
+              ('sequence', 'Sequence', 32), ('skew', 'Skew R−L µs', 32), ('crc', 'CRC-16', 16))
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName('controlCard')
-        main = QtWidgets.QVBoxLayout(self)
-        main.setContentsMargins(6, 3, 6, 3)
-        main.setSpacing(2)
-        header_card = QtWidgets.QFrame()
-        header_card.setObjectName('diagnosticsHeader')
-        head = QtWidgets.QHBoxLayout(header_card)
-        head.setContentsMargins(6, 2, 6, 2)
-        head.setSpacing(8)
-        self.toggle = QtWidgets.QPushButton('▸ Diagnostics')
-        self.toggle.setCheckable(True)
-        self.toggle.setToolTip('Show CRC counts, timestamps, clock measurements and original barcode')
-        self.toggle.toggled.connect(self._expand)
-        head.addWidget(self.toggle)
-        self.crc_summary = QtWidgets.QLabel('CRC —  ·  Invalid —  ·  Lost —')
-        self.crc_summary.setObjectName('diagnosticsSummary')
-        head.addWidget(self.crc_summary)
-        head.addStretch()
-        main.addWidget(header_card)
+        self.image = None
+        self.values = {}
+        self.ok = None
+        self._label_font = display_font(10)
+        self._value_font = numeric_font(12)
+        self.setFixedHeight(84)
+        self.setToolTip('Original 6×16-pixel cells from the received frame (black = 1). '
+                        'Fields left to right: magic, version, left UTC ms, sequence, '
+                        'right-minus-left skew, CRC-16.')
+
+    def set_strip(self, image: QtGui.QImage):
+        self.image = image
+        self.update()
+
+    def set_values(self, values: dict, ok: bool):
+        if values != self.values or ok != self.ok:
+            self.values, self.ok = dict(values), ok
+            self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        width = self.width()
+        strip = QtCore.QRectF(0, 0, width, 30)
+        if self.image is None:
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            p.setPen(QtGui.QColor(COLORS['border']))
+            p.setBrush(QtGui.QColor(COLORS['raised']))
+            p.drawRoundedRect(strip.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
+            p.setPen(QtGui.QColor(COLORS['muted']))
+            p.setFont(ui_font(12))
+            p.drawText(strip, QtCore.Qt.AlignmentFlag.AlignCenter, 'Waiting for timestamp data')
+        else:
+            # Nearest-neighbour keeps every bit cell crisp.
+            p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, False)
+            p.drawImage(strip, self.image)
+        x = 0.0
+        y = 36.0
+        for key, name, bits in self.FIELDS:
+            field_w = width * bits / 168.0
+            p.setPen(QtGui.QPen(QtGui.QColor(COLORS['border_strong']), 1))
+            p.drawLine(QtCore.QPointF(x + 2, y), QtCore.QPointF(x + field_w - 2, y))
+            p.drawLine(QtCore.QPointF(x + 2, y - 3), QtCore.QPointF(x + 2, y + 2))
+            p.drawLine(QtCore.QPointF(x + field_w - 2, y - 3), QtCore.QPointF(x + field_w - 2, y + 2))
+            box = QtCore.QRectF(x + 2, y + 4, field_w - 4, 16)
+            p.setFont(self._label_font)
+            p.setPen(QtGui.QColor(COLORS['muted']))
+            label = QtGui.QFontMetrics(self._label_font).elidedText(
+                name.upper(), QtCore.Qt.TextElideMode.ElideRight, int(box.width()))
+            p.drawText(box, QtCore.Qt.AlignmentFlag.AlignCenter, label)
+            value = self.values.get(key, '—')
+            color = COLORS['text']
+            if key == 'crc' and self.ok is not None:
+                color = COLORS['good'] if self.ok else COLORS['bad']
+            p.setFont(self._value_font)
+            p.setPen(QtGui.QColor(color))
+            value_box = QtCore.QRectF(x + 2, y + 21, field_w - 4, 20)
+            value = QtGui.QFontMetrics(self._value_font).elidedText(
+                str(value), QtCore.Qt.TextElideMode.ElideRight, int(value_box.width()))
+            p.drawText(value_box, QtCore.Qt.AlignmentFlag.AlignCenter, value)
+            x += field_w
+        p.end()
+
+
+class DiagnosticsPanel(QtWidgets.QWidget):
+    """Decoder evidence: integrity counters, annotated barcode and raw telemetry."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
         self.contents = QtWidgets.QWidget()
-        inner = QtWidgets.QVBoxLayout(self.contents)
-        inner.setContentsMargins(0, 0, 0, 0)
-        inner.setSpacing(3)
+        scroll.setWidget(self.contents)
+        layout = QtWidgets.QVBoxLayout(self.contents)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
+        top = QtWidgets.QHBoxLayout()
+        self.crc_summary = QtWidgets.QLabel('Valid —  ·  Invalid —  ·  Lost —')
+        self.crc_summary.setObjectName('secondary')
+        self.crc_summary.setFont(numeric_font(13))
+        self.decode_status = QtWidgets.QLabel('○ Waiting for the first frame')
+        self.decode_status.setObjectName('stateBadge')
+        self.decode_status.setFont(ui_font(12, QtGui.QFont.Weight.DemiBold))
+        top.addWidget(self.crc_summary)
+        top.addStretch()
+        top.addWidget(self.decode_status)
+        layout.addLayout(top)
+        self.barcode = BarcodeView()
+        layout.addWidget(self.barcode)
         self.telemetry = TelemetryBar()
-        inner.addWidget(self.telemetry)
-        self.barcode = QtWidgets.QLabel('Waiting for timestamp data')
-        self.barcode.setFixedHeight(30)
-        self.barcode.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft |
-                                  QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.note = QtWidgets.QLabel('168-bit UTC timestamp + CRC16 · Original source pixels')
-        self.note.setObjectName('minor')
-        inner.addWidget(self.barcode)
-        inner.addWidget(self.note)
-        main.addWidget(self.contents)
-        self.contents.hide()
+        layout.addWidget(self.telemetry)
+        layout.addStretch()
         self.crc_error = False
 
-    def _expand(self, checked: bool):
-        self.contents.setVisible(checked)
-        self.toggle.setText(('▾' if checked else '▸') + ' Diagnostics')
-
     def update_counts(self, valid, invalid, lost):
-        summary = ('▲ ' if invalid or lost else '') + f'CRC {valid}  ·  Invalid {invalid}  ·  Lost {lost}'
+        summary = f'Valid {valid:,}  ·  Invalid {invalid:,}  ·  Lost {lost:,}'
         if self.crc_summary.text() != summary:
             self.crc_summary.setText(summary)
 
-    def flag_crc_error(self):
+    def flag_crc_error(self, message='CRC error in the latest frame'):
         self.crc_error = True
-        self.crc_summary.setText('▲ CRC ERROR · inspect Diagnostics')
-        self.toggle.setToolTip('CRC error detected — expand to inspect the source barcode')
+        self.set_decode_result(False, message)
+
+    def set_decode_result(self, ok: bool, message: str = ''):
+        text = '● Latest frame decoded · CRC valid' if ok else f'✕ {message}'
+        if self.decode_status.text() != text:
+            self.decode_status.setText(text)
+        set_state(self.decode_status, 'good' if ok else 'bad')
 
     def update_barcode(self, frame):
         if not self.contents.isVisible():
             return
-        y = frame.shape[0] - 27
-        bars = frame[y:y+16, 12:12+168*6, ::-1]
-        if bars.shape != (16, 1008, 3):
+        strip = extract_strip(frame)
+        if strip is None:
             return
-        arr = np.ascontiguousarray(bars)
-        image = QtGui.QImage(arr.data, 1008, 16, 1008*3,
+        rgb = np.ascontiguousarray(strip[:, :, ::-1])
+        height, width = rgb.shape[:2]
+        image = QtGui.QImage(rgb.data, width, height, width * 3,
                              QtGui.QImage.Format.Format_RGB888).copy()
-        target = min(1008, max(100, self.barcode.width()-10))
-        self.barcode.setPixmap(QtGui.QPixmap.fromImage(image).scaled(
-            target, 28, QtCore.Qt.AspectRatioMode.IgnoreAspectRatio,
-            QtCore.Qt.TransformationMode.FastTransformation))
+        self.barcode.set_strip(image)
 
 
-class LatencyChart(QtWidgets.QFrame):
-    """Delay/skew history with stable scale, crosshair and bounded updates."""
+class FramesAgoAxis(pg.AxisItem):
+    """Bottom axis: samples sit at x = -n, labelled as 'n frames ago' (whole frames)."""
+    def tickSpacing(self, minVal, maxVal, size):
+        levels = super().tickSpacing(minVal, maxVal, size)
+        return [(max(1.0, spacing), offset) for spacing, offset in (levels[1:2] or levels[:1])]
+
+    def tickStrings(self, values, scale, spacing):
+        return [f'{abs(value):g}' for value in values]
+
+
+def _fade_brush(color, top_alpha=70):
+    """Area fill that fades from the line towards the baseline."""
+    gradient = QtGui.QLinearGradient(0, 0, 0, 1)
+    gradient.setCoordinateMode(QtGui.QGradient.CoordinateMode.ObjectBoundingMode)
+    gradient.setColorAt(0.0, tint(color, 4))
+    gradient.setColorAt(1.0, tint(color, top_alpha))
+    return QtGui.QBrush(gradient)
+
+
+class LatencyChart(QtWidgets.QWidget):
+    """Delay/skew history: raw samples, mean, provisional threshold bands, hover readout."""
+    MODES = {
+        'delay': {'color': COLORS['accent'], 'axis': 'Delay',
+                  'mean': 'mean {value:.0f} ms', 'value': '{:.1f} ms'},
+        'skew': {'color': COLORS['skew'], 'axis': 'Skew',
+                 'mean': 'mean {value:+.1f} ms', 'value': '{:+.2f} ms'},
+    }
+
     def __init__(self, axis_cls, parent=None):
         super().__init__(parent)
-        self.setObjectName('controlCard')
         self.samples_limit = 100
         self.paused = False
         self.mode = 'delay'
         self.high_envelope = 500.0
+        self._sources = ((), ())
+        self._last_mouse = None
         main = QtWidgets.QVBoxLayout(self)
-        main.setContentsMargins(6,3,6,3)
-        main.setSpacing(2)
-        self.setMinimumHeight(148)
-        self.setMaximumHeight(192)
-        header = QtWidgets.QHBoxLayout()
-        self.title = QtWidgets.QLabel('LATENCY HISTORY')
-        self.title.setObjectName('sectionTitle')
-        header.addWidget(self.title)
-        self.delay_button = QtWidgets.QPushButton('Delay')
-        self.skew_button = QtWidgets.QPushButton('Skew')
-        self.delay_button.setCheckable(True)
-        self.skew_button.setCheckable(True)
-        self.delay_button.setChecked(True)
-        self.delay_button.clicked.connect(lambda: self.set_mode('delay'))
-        self.skew_button.clicked.connect(lambda: self.set_mode('skew'))
-        header.addWidget(self.delay_button)
-        header.addWidget(self.skew_button)
-        self.window = QtWidgets.QComboBox()
-        for n in (100,500,2000):
-            self.window.addItem(f'{n} frames', n)
-        self.window.currentIndexChanged.connect(self._set_window)
-        header.addWidget(self.window)
-        self.pause = QtWidgets.QPushButton('Pause')
-        self.pause.setCheckable(True)
-        self.pause.toggled.connect(self._set_pause)
-        header.addWidget(self.pause)
-        main.addLayout(header)
-
+        main.setContentsMargins(4, 6, 12, 4)
         self.axis = axis_cls('left')
-        self.plot = pg.PlotWidget(axisItems={'left':self.axis})
-        self.plot.setMinimumHeight(91)
-        self.plot.getAxis('left').setWidth(70)
-        self.plot.getAxis('left').setTickFont(QtGui.QFont(FONT_UI, 10))
-        self.plot.setLabel('bottom', 'Frames ago', color=COLORS['secondary'])
-        self.plot.showGrid(x=True,y=True,alpha=.18)
-        self.plot.setMouseEnabled(x=False,y=False)
+        self.plot = pg.PlotWidget(axisItems={'left': self.axis, 'bottom': FramesAgoAxis('bottom')})
+        self.plot.setBackground(COLORS['surface'])
+        self.plot.setMenuEnabled(False)
+        self.plot.hideButtons()
+        for name in ('left', 'bottom'):
+            axis = self.plot.getAxis(name)
+            axis.setPen(pg.mkPen(COLORS['border_strong']))
+            axis.setTextPen(pg.mkPen(COLORS['secondary']))
+            axis.setTickFont(ui_font(11))
+        self.axis.setWidth(64)
+        self.plot.setLabel('bottom', 'Frames ago', color=COLORS['muted'], size='9pt')
+        self.plot.showGrid(x=False, y=True, alpha=0.10)
+        self.plot.setMouseEnabled(x=False, y=False)
+        self.bands = {}
+        for name, color in (('warn_hi', 'warning'), ('bad_hi', 'bad'),
+                            ('warn_lo', 'warning'), ('bad_lo', 'bad')):
+            band = pg.LinearRegionItem(values=(0, 1), orientation='horizontal', movable=False,
+                                       brush=pg.mkBrush(tint(COLORS[color], 10)),
+                                       pen=pg.mkPen(tint(COLORS[color], 110), width=1,
+                                                    style=QtCore.Qt.PenStyle.DotLine))
+            band.setZValue(-20)
+            self.plot.addItem(band, ignoreBounds=True)
+            self.bands[name] = band
+        self.zero_line = pg.InfiniteLine(angle=0, pos=0, pen=pg.mkPen(COLORS['border_strong']))
+        self.plot.addItem(self.zero_line, ignoreBounds=True)
         self.line = self.plot.plot(pen=pg.mkPen(COLORS['accent'], width=2))
         self.line.setClipToView(True)
         self.line.setDownsampling(auto=True)
-        self.mean_line = pg.InfiniteLine(angle=0, pen=pg.mkPen(COLORS['info'],
-                                                            style=QtCore.Qt.PenStyle.DashLine))
-        self.target_line = pg.InfiniteLine(angle=0, pen=pg.mkPen(COLORS['warning'],
-                                                               style=QtCore.Qt.PenStyle.DotLine))
-        self.plot.addItem(self.mean_line)
-        self.plot.addItem(self.target_line)
+        self.line.setFillLevel(0)
+        self.mean_line = pg.InfiniteLine(
+            angle=0, pen=pg.mkPen(COLORS['secondary'], width=1, style=QtCore.Qt.PenStyle.DashLine),
+            label='mean {value:.0f} ms',
+            labelOpts={'position': 0.985, 'color': COLORS['secondary'],
+                       'anchors': [(1, 1), (1, 1)], 'fill': tint(COLORS['surface'], 210)})
+        self.mean_line.label.setFont(ui_font(11, QtGui.QFont.Weight.DemiBold))
+        self.plot.addItem(self.mean_line, ignoreBounds=True)
+        self.mean_line.hide()
         self.crosshair = pg.InfiniteLine(angle=90, movable=False,
-                                         pen=pg.mkPen(COLORS['secondary'], width=1))
-        self.plot.addItem(self.crosshair)
+                                         pen=pg.mkPen(COLORS['border_strong'], width=1))
+        self.plot.addItem(self.crosshair, ignoreBounds=True)
         self.crosshair.hide()
-        self.hover_info = QtWidgets.QLabel('—')
-        self.hover_info.setObjectName('minor')
+        self.marker = pg.ScatterPlotItem(size=9, pen=pg.mkPen(COLORS['surface'], width=2))
+        self.marker.setZValue(30)
+        self.plot.addItem(self.marker, ignoreBounds=True)
+        self.hover_label = pg.TextItem('', color=COLORS['text'], fill=pg.mkBrush(COLORS['raised']),
+                                       border=pg.mkPen(COLORS['border_strong']), anchor=(0, 0))
+        self.hover_label.setFont(numeric_font(12))
+        self.hover_label.setZValue(40)
+        self.plot.addItem(self.hover_label, ignoreBounds=True)
+        self.hover_label.hide()
+        self.placeholder = pg.TextItem('Waiting for valid frames…', color=COLORS['muted'],
+                                       anchor=(0.5, 0.5))
+        self.placeholder.setFont(ui_font(13))
+        self.plot.addItem(self.placeholder, ignoreBounds=True)
         main.addWidget(self.plot, stretch=1)
-        main.addWidget(self.hover_info)
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.plot.viewport().installEventFilter(self)
         self._xdata = np.empty(2000, dtype=float)
         self._ydata = np.empty(2000, dtype=float)
         self._display_count = 0
@@ -310,72 +523,238 @@ class LatencyChart(QtWidgets.QFrame):
         self.plot.getViewBox().sigYRangeChanged.connect(self._axis_changed)
         self.set_mode('delay')
 
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Type.Leave:
+            self._last_mouse = None
+            self._hide_hover()
+        return False
+
     def _axis_changed(self, *args):
         if self.mode == 'delay':
             lo, hi = self.plot.getViewBox().viewRange()[1]
             self.axis.update_for_range(lo, hi)
 
-    def _set_window(self, index):
-        self.samples_limit = int(self.window.currentData())
-        self.high_envelope = 500.0
+    def set_window(self, samples: int):
+        self.samples_limit = int(samples)
+        self.high_envelope = 500.0 if self.mode == 'delay' else 30.0
         self._display_count = 0
+        self._render(force=True)
 
-    def _set_pause(self, paused):
-        self.paused = paused
-        self.pause.setText('Resume' if paused else 'Pause')
+    def set_paused(self, paused: bool):
+        self.paused = bool(paused)
 
     def set_mode(self, mode):
         self.mode = mode
-        self.delay_button.setChecked(mode=='delay')
-        self.skew_button.setChecked(mode=='skew')
-        self.title.setText('LATENCY HISTORY' if mode=='delay' else 'CAMERA SKEW HISTORY')
-        self.high_envelope = 500.0 if mode=='delay' else 30.0
+        spec = self.MODES[mode]
+        self.line.setPen(pg.mkPen(spec['color'], width=2))
+        self.line.setBrush(_fade_brush(spec['color']))
+        self.marker.setBrush(pg.mkBrush(spec['color']))
+        self.mean_line.label.setFormat(spec['mean'])
+        self.high_envelope = 500.0 if mode == 'delay' else 30.0
         self._display_count = 0
         self.axis.enableAutoSIPrefix(False)
+        t = THRESHOLDS
         if mode == 'delay':
-            self.axis.setLabel('Delay (ms)',color=COLORS['text'],size='11pt')
+            self.axis.unit = 'ms'
+            self.axis.setLabel('Delay (ms)', color=COLORS['secondary'], size='10pt')
             self.axis.update_for_range(0, self.high_envelope)
-            self.target_line.setValue(THRESHOLDS.delay_good_below_ms)
+            spans = {'warn_hi': (t.delay_good_below_ms, t.delay_warn_below_ms),
+                     'bad_hi': (t.delay_warn_below_ms, 1e6)}
         else:
             self.axis.unit = 'ms'
-            self.axis.setLabel('Skew (ms)',color=COLORS['text'],size='11pt')
-            self.target_line.setValue(THRESHOLDS.skew_warn_below_ms)
+            self.axis.setLabel('Skew (ms)', color=COLORS['secondary'], size='10pt')
+            spans = {'warn_hi': (t.skew_good_below_ms, t.skew_warn_below_ms),
+                     'bad_hi': (t.skew_warn_below_ms, 1e6),
+                     'warn_lo': (-t.skew_warn_below_ms, -t.skew_good_below_ms),
+                     'bad_lo': (-1e6, -t.skew_warn_below_ms)}
+        for name, band in self.bands.items():
+            band.setVisible(name in spans)
+            if name in spans:
+                band.setRegion(spans[name])
+        self.zero_line.setVisible(mode == 'skew')
+        self._hide_hover()
+        self._render(force=True)
 
     def update_samples(self, delays, skews):
-        if self.paused:
+        self._sources = (delays, skews)
+        if not self.paused:
+            self._render()
+
+    def _render(self, force=False):
+        values = self._sources[0] if self.mode == 'delay' else self._sources[1]
+        count = min(self.samples_limit, len(values))
+        if not count:
+            self._display_count = 0
+            self.line.setData([], [])
+            self.mean_line.hide()
+            self.plot.setXRange(-self.samples_limit + 1, 0, padding=0.01)
+            low = 0.0 if self.mode == 'delay' else -self.high_envelope
+            self.plot.setYRange(low, self.high_envelope, padding=0)
+            self.placeholder.setPos(-(self.samples_limit - 1) / 2, (low + self.high_envelope) / 2)
+            self.placeholder.show()
             return
-        values = delays if self.mode=='delay' else skews
-        if not values:
-            return
-        count = min(self.samples_limit,len(values))
+        self.placeholder.hide()
         samples = list(values)[-count:]
-        self._xdata[:count] = np.arange(-count+1,1,dtype=float)
+        self._xdata[:count] = np.arange(-count + 1, 1, dtype=float)
         self._ydata[:count] = samples
         self._display_count = count
         self.line.setData(self._xdata[:count], self._ydata[:count])
         self._last_mean = float(np.mean(self._ydata[:count]))
         self.mean_line.setValue(self._last_mean)
+        self.mean_line.show()
         vmin = float(np.min(self._ydata[:count]))
         vmax = float(np.max(self._ydata[:count]))
-        floor = 0.0 if self.mode=='delay' else min(0,vmin*1.15)
-        desired_top = max(vmax*1.2, THRESHOLDS.delay_good_below_ms*1.15) if self.mode=='delay' else max(20.0,vmax*1.3)
+        if self.mode == 'delay':
+            floor = 0.0
+            desired_top = max(vmax * 1.2, THRESHOLDS.delay_good_below_ms * 1.15)
+        else:
+            floor = min(-THRESHOLDS.skew_good_below_ms * 1.5, vmin * 1.3)
+            desired_top = max(20.0, vmax * 1.3)
         # Fast expansion, slow reduction to prevent visual jumping.
-        self.high_envelope = max(desired_top, self.high_envelope*.985)
-        self.plot.setYRange(floor, max(floor+1, self.high_envelope), padding=0)
+        self.high_envelope = max(desired_top, self.high_envelope * .985)
+        self.plot.setXRange(-max(1, count - 1), 0, padding=0.01)
+        self.plot.setYRange(floor, max(floor + 1, self.high_envelope), padding=0)
         self._axis_changed()
+        if self._last_mouse is not None:
+            self._mouse_moved(self._last_mouse)
+
+    def _hide_hover(self):
+        self.crosshair.hide()
+        self.marker.hide()
+        self.hover_label.hide()
 
     def _mouse_moved(self, pos):
-        if not self._display_count:
+        self._last_mouse = pos
+        if not self._display_count or not self.plot.sceneBoundingRect().contains(pos):
+            self._hide_hover()
             return
         view = self.plot.getViewBox()
-        if not self.plot.sceneBoundingRect().contains(pos):
-            return
         point = view.mapSceneToView(pos)
-        i = int(round(point.x() + self._display_count-1))
+        i = int(round(point.x() + self._display_count - 1))
         if i < 0 or i >= self._display_count:
+            self._hide_hover()
             return
-        self.crosshair.setPos(self._xdata[i])
+        x, y = self._xdata[i], self._ydata[i]
+        self.crosshair.setPos(x)
         self.crosshair.show()
-        self.hover_info.setText(
-            f'{abs(int(self._xdata[i]))} frames ago · {self._ydata[i]:.2f} ms '
-            f'· mean {self._last_mean:.2f} ms')
+        self.marker.setData([x], [y])
+        self.marker.show()
+        value = self.MODES[self.mode]['value'].format(y)
+        self.hover_label.setText(f'{value}\n{abs(int(x))} frames ago')
+        (x_lo, x_hi), (_, y_hi) = view.viewRange()
+        right_half = x > x_lo + 0.62 * (x_hi - x_lo)
+        self.hover_label.setAnchor((1.08, 0) if right_half else (-0.08, 0))
+        self.hover_label.setPos(x, y_hi)
+        self.hover_label.show()
+
+
+class AnalysisCard(QtWidgets.QFrame):
+    """Delay history, skew history and diagnostics behind one tab control."""
+    tab_changed = QtCore.Signal(str)
+    TABS = (('delay', 'Frame delay', 'NTP-corrected frame delay history · raw samples'),
+            ('skew', 'Camera skew', 'Right-minus-left camera timestamp history · raw samples'),
+            ('diagnostics', 'Diagnostics',
+             'Timestamp barcode, CRC counters, clock and link details · shortcut D'))
+
+    def __init__(self, axis_cls, parent=None):
+        super().__init__(parent)
+        self.setObjectName('card')
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        header = QtWidgets.QFrame()
+        header.setObjectName('cardHeader')
+        row = QtWidgets.QHBoxLayout(header)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(10)
+        self.tabs = SegmentedControl(self.TABS)
+        self.legend = QtWidgets.QLabel()
+        self.legend.setObjectName('legend')
+        self.legend.setFont(ui_font(12))
+        self.legend.setToolTip('Provisional display thresholds from client/theme.py; '
+                               'not validated competition limits.')
+        self.window = SegmentedControl((('100', '100', 'Show the last 100 frames'),
+                                        ('500', '500', 'Show the last 500 frames'),
+                                        ('2000', '2000', 'Show the last 2000 frames')))
+        self.window_caption = QtWidgets.QLabel('frames')
+        self.window_caption.setObjectName('caption')
+        self.window_caption.setFont(ui_font(12))
+        self.pause = QtWidgets.QToolButton()
+        self.pause.setCheckable(True)
+        self.pause.setIcon(icon('pause', COLORS['secondary']))
+        self.pause.setIconSize(QtCore.QSize(16, 16))
+        self.pause.setToolTip('Pause the chart · shortcut P')
+        row.addWidget(self.tabs)
+        row.addSpacing(6)
+        row.addWidget(self.legend)
+        row.addStretch()
+        row.addWidget(self.window)
+        row.addWidget(self.window_caption)
+        row.addWidget(self.pause)
+        layout.addWidget(header)
+        self.stack = QtWidgets.QStackedWidget()
+        self.chart = LatencyChart(axis_cls)
+        self.diagnostics = DiagnosticsPanel()
+        self.stack.addWidget(self.chart)
+        self.stack.addWidget(self.diagnostics)
+        layout.addWidget(self.stack, 1)
+        self.current = None
+        self._last_chart_tab = 'delay'
+        self.tabs.selected.connect(self.show_tab)
+        self.window.selected.connect(lambda value: self.chart.set_window(int(value)))
+        self.pause.toggled.connect(self._set_paused)
+        self.show_tab('delay', emit=False)
+
+    def show_tab(self, key: str, emit=True):
+        if key == self.current:
+            return
+        self.current = key
+        if self.tabs.current != key:
+            self.tabs.select(key, emit=False)
+        chart_tab = key in ('delay', 'skew')
+        if chart_tab:
+            self._last_chart_tab = key
+            self.chart.set_mode(key)
+            self.stack.setCurrentWidget(self.chart)
+        else:
+            self.stack.setCurrentWidget(self.diagnostics)
+        for widget in (self.window, self.window_caption, self.pause):
+            widget.setVisible(chart_tab)
+        self._update_legend()
+        if emit:
+            self.tab_changed.emit(key)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_legend()
+
+    def _fit_legend(self):
+        """The threshold legend is the first thing to go when the card is narrow."""
+        chart_tab = self.current in ('delay', 'skew')
+        parts = (self.tabs, self.legend, self.window, self.window_caption, self.pause)
+        needed = sum(part.sizeHint().width() for part in parts) + 6 * 10 + 20
+        self.legend.setVisible(chart_tab and self.width() >= needed)
+
+    def toggle_diagnostics(self):
+        self.show_tab(self._last_chart_tab if self.current == 'diagnostics' else 'diagnostics')
+
+    def toggle_pause(self):
+        if self.current in ('delay', 'skew'):
+            self.pause.toggle()
+
+    def _set_paused(self, paused):
+        self.chart.set_paused(paused)
+        self.pause.setIcon(icon('play' if paused else 'pause',
+                                COLORS['accent'] if paused else COLORS['secondary']))
+        self.pause.setToolTip(('Resume' if paused else 'Pause') + ' the chart · shortcut P')
+
+    def _update_legend(self):
+        t = THRESHOLDS
+        if self.current == 'skew':
+            watch, high = f'|skew| ≥ {t.skew_good_below_ms:g} ms', f'≥ {t.skew_warn_below_ms:g} ms'
+        else:
+            watch, high = f'≥ {t.delay_good_below_ms:g} ms', f'≥ {t.delay_warn_below_ms:g} ms'
+        self.legend.setText(
+            f'<span style="color:{COLORS["warning"]}">■</span> watch {watch}'
+            f'&nbsp;&nbsp;&nbsp;<span style="color:{COLORS["bad"]}">■</span> high {high}')
+        self._fit_legend()

@@ -56,14 +56,22 @@ _SEGMENTS = {
 
 
 class SevenSegmentDisplay(QtWidgets.QFrame):
-    """Large anti-aliased instrument; draws exactly three seven-segment digits."""
+    """Large anti-aliased instrument; draws exactly three seven-segment digits.
 
-    def __init__(self, title, color='#63edba', parent=None):
+    The colour carries the reading's state (set by the owning KPI card); the
+    digits, decimal point and unit are always drawn so state is never colour-only.
+    """
+    SLANT = 0.07  # classic instrument lean, as a horizontal shear factor
+    max_scale = 10.0  # cap on digit growth; owners lower it for calmer dashboards
+
+    def __init__(self, title, color='#63edba', parent=None, show_title=True):
         super().__init__(parent)
         self.setObjectName('sevenSegmentInstrument')
-        self.setMinimumSize(165, 92)
+        self.setMinimumSize(120, 48 if not show_title else 92)
         self.title = title
+        self.show_title = show_title
         self.color = QtGui.QColor(color)
+        self.unit_color = QtGui.QColor('#A3B3C6')
         self.digits = '---'
         self.decimal = None
         self.sign = ''
@@ -76,51 +84,72 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
             self.digits, self.decimal, self.sign, self.unit = formatted
             self.update()
 
+    def set_color(self, color):
+        color = QtGui.QColor(color)
+        if color != self.color:
+            self.color = color
+            self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         bounds = self.rect()
-        p.setPen(QtGui.QColor('#aebfd5'))
-        font = QtGui.QFont('Segoe UI', 10, QtGui.QFont.Weight.DemiBold)
-        p.setFont(font)
-        p.drawText(QtCore.QRectF(7, 3, bounds.width()-14, 22),
-                   QtCore.Qt.AlignmentFlag.AlignLeft, self.title)
+        top = 4
+        if self.show_title:
+            p.setPen(QtGui.QColor('#A3B3C6'))
+            p.setFont(QtGui.QFont('Segoe UI', 10, QtGui.QFont.Weight.DemiBold))
+            p.drawText(QtCore.QRectF(7, 3, bounds.width()-14, 22),
+                       QtCore.Qt.AlignmentFlag.AlignLeft, self.title)
+            top = 26
 
         # Draw on a normalized coordinate system so proportions remain readable
-        # as the bottom dock is resized.
-        area = QtCore.QRectF(6, 26, max(20, bounds.width()-12),
-                             max(30, bounds.height()-30))
-        scale = min(area.width()/190, area.height()/86)
-        xoffset = area.left() + (area.width()-190*scale)/2
-        yoffset = area.top() + (area.height()-86*scale)/2
+        # as the dashboard is resized.
+        area = QtCore.QRectF(6, top, max(20, bounds.width()-12),
+                             max(30, bounds.height()-top-4))
+        scale = min(area.width()/196, area.height()/80, self.max_scale)
+        xoffset = area.left() + (area.width()-196*scale)/2
+        yoffset = area.top() + (area.height()-80*scale)/2
         p.translate(xoffset, yoffset)
         p.scale(scale, scale)
-        p.setPen(QtCore.Qt.PenStyle.NoPen)
         active = self.color
         inactive = QtGui.QColor(active)
-        inactive.setAlpha(8)  # barely visible unlit segments; lit LEDs stay bright
+        inactive.setAlpha(11)  # barely visible unlit segments; lit LEDs stay bright
+        glow = QtGui.QColor(active)
+        glow.setAlpha(70)
 
-        # Fixed slot layout: sign, three 43px digits, units.
+        p.save()
+        # Lean the digits like a physical instrument; the unit stays upright.
+        p.translate(self.SLANT * 74, 0)
+        p.shear(-self.SLANT, 0)
+        # Fixed slot layout: sign, three 44px digits, units.
+        p.setPen(QtGui.QPen(glow, 1.6))
         if self.sign:
             p.setBrush(active)
-            p.drawRoundedRect(QtCore.QRectF(1, 39, 17, 6), 2, 2)
+            p.drawRoundedRect(QtCore.QRectF(1, 34, 15, 6), 2, 2)
         for i, char in enumerate(self.digits):
-            self._draw_digit(p, 20 + i*44, 4, char, active, inactive)
+            self._draw_digit(p, 20 + i*44, 2, char, active, inactive, glow)
         if self.decimal is not None and 0 <= self.decimal <= 3:
             # Decimal at digit boundary; for .123 it precedes first digit.
-            dot_x = 18 if self.decimal == 0 else 20 + (self.decimal-1)*44 + 39
+            dot_x = 12 if self.decimal == 0 else 20 + (self.decimal-1)*44 + 37.5
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
             p.setBrush(active)
-            p.drawEllipse(QtCore.QRectF(dot_x, 69, 6.8, 6.8))
-        p.setPen(QtGui.QColor('#c9dbed'))
-        unit_font = QtGui.QFont('Segoe UI', 13, QtGui.QFont.Weight.Bold)
+            p.drawEllipse(QtCore.QRectF(dot_x, 66, 6.8, 6.8))
+        p.restore()
+
+        p.setPen(self.unit_color)
+        unit_font = QtGui.QFont()
+        unit_font.setFamilies(['Bahnschrift', 'Segoe UI'])
+        unit_font.setPixelSize(19)
+        unit_font.setWeight(QtGui.QFont.Weight.DemiBold)
         p.setFont(unit_font)
-        p.drawText(QtCore.QRectF(153, 45, 38, 29),
-                   QtCore.Qt.AlignmentFlag.AlignLeft, self.unit)
+        p.drawText(QtCore.QRectF(156, 44, 40, 30),
+                   QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignBottom,
+                   self.unit)
         p.end()
 
     @staticmethod
-    def _draw_digit(p, ox, oy, char, active, inactive):
+    def _draw_digit(p, ox, oy, char, active, inactive, glow=None):
         # Seven segments in a 36×69 nominal digit.
         shapes = {
             'a': [(7, 0), (29, 0), (25, 6), (11, 6)],
@@ -132,7 +161,10 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
             'c': [(33, 36), (36, 41), (36, 61), (33, 66), (27, 60), (27, 42)],
         }
         enabled = _SEGMENTS.get(char, '')
+        lit_pen = QtGui.QPen(glow, 1.6) if glow is not None else QtCore.Qt.PenStyle.NoPen
         for segment, vertices in shapes.items():
-            p.setBrush(active if segment in enabled else inactive)
+            lit = segment in enabled
+            p.setPen(lit_pen if lit else QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(active if lit else inactive)
             poly = QtGui.QPolygonF([QtCore.QPointF(ox+x, oy+y) for x, y in vertices])
             p.drawPolygon(poly)

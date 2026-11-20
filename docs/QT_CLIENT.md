@@ -93,20 +93,20 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 
 ## Features
 
-- Maximized **dark-themed** desktop app, with resizable camera panels and single-camera focus
-- High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan
-- **Mouse drag** over each camera after choosing `Select LEFT ROI` or `Select RIGHT ROI`
-- Editable/resizable ROI handles, reset per camera, native-coordinate cropping before YOLO
-- Latest-frame asynchronous YOLO predictions, class names, boxes, confidence on both cameras
-- 168-bit binary CRC16 visual strip remains visible and sharp; original incoming frames unchanged
-- NTP-corrected frame age, left/right UTC timestamps, camera skew, CRC statistics
-- Real-time latency chart with labelled axes and legend
+- Maximized **dark-themed** desktop app; the camera row is sized to the video aspect ratio, with the remaining height for the dashboard
+- App-bar status pills for **Stream, Clock, YOLO and Data integrity**; click any pill for Diagnostics
+- High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
+- Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
+- Latest-frame asynchronous YOLO predictions with per-class colours, class names and confidence on both cameras
+- KPI readouts (average delay, P95, smoothed skew) coloured by provisional thresholds; greyed as *Stale* when frames stop
+- Delay/skew history with threshold bands, mean line and hover readout; Diagnostics with the field-annotated 168-bit CRC16 barcode
+- Original incoming frames unchanged; client-only image adjustments affect display and YOLO input only
 
-Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window.
+Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause chart.
 
 ## Technical details
 
-The new client imports the existing `StreamReceiver`, `decode_strip`, and `iso_utc` from `stereo_vision_client_multiclient.py`. No changes to the server or transmission format are needed. Qt runs on the main thread, GStreamer delivers its most recent frames in its own callback, and the YOLO worker operates in a separate thread with a one-frame pending queue.
+The client uses the shared `client/receiver.py` (`StreamReceiver`) and `common/stamp_protocol.py` (`decode_strip`, `iso_utc`). No changes to the server or transmission format are needed. Qt runs on the main thread, GStreamer delivers its most recent frames in its own callback, and the YOLO worker operates in a separate thread with a one-frame pending queue.
 
 ROIs are in **original camera pixels**, not pixels on the Windows screen. They are preview overlays, not a new network encoding. Two camera images feed YOLO independently, and each bounding box is translated back to its camera space.
 

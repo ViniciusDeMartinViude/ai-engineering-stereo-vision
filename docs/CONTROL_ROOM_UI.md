@@ -180,3 +180,51 @@ The client processes only the video area (the first `height - 100` rows), leavin
 5. Toggle the panel closed/open and confirm slider positions persist. Restart the application to confirm per-client persistence.
 6. Expand Diagnostics and confirm **CRC Valid** continues to increment without new invalid timestamp errors.
 7. Compare receiver FPS and end-to-end delay with all controls neutral versus active, on the same source and machine. Pixel correction may add client-side CPU load.
+
+## Visual and UX redesign (`feature/ui-redesign`)
+
+A visual pass over the whole Qt client. Streaming, timestamp decoding, SNTP, YOLO and the image-adjustment maths are unchanged; the work is in `client/theme.py`, `client/control_room_widgets.py`, `client/seven_segment.py`, `client/image_adjustments.py`, the new `client/icons.py`, and the layout code in `client/stereo_vision_client_qt.py`.
+
+### Layout
+
+- **No letterboxing.** The camera row takes exactly the height its aspect ratio can use at the current width; the remaining height goes to the dashboard (230–430 px). Expanding one camera gives it the extra height and compresses the dashboard.
+- **App bar** with four status pills: **Stream**, **Clock**, **YOLO** and **Data** (CRC/lost-frame integrity over the last 10 s). Each pill pairs a colour with a shape (● ▲ ✕ ◆ ○) and a word, keeps a fixed width, and shows details (multicast group, packets/s, RTT, model, error text) in its tooltip. Clicking any pill opens Diagnostics.
+- **Dashboard**: average delay as the main reading, P95 and smoothed skew beside it, and an analysis card with **Frame delay | Camera skew | Diagnostics** tabs.
+
+### Meaning through colour
+
+- KPI digits and badges now use the provisional thresholds in `theme.py` (**OK / Watch / High**), and turn grey with a **Stale** badge while no frames arrive, so an old green reading never looks live.
+- Cyan is now reserved for interactive elements. Detections get a stable colour per class, chosen to contrast with the green belt; the ROI is white.
+- All text colours meet WCAG AA contrast on the surfaces they use.
+
+### Camera tiles
+
+- The header shows the L/R badge, object count (class breakdown in the tooltip), the ROI size with a **×** clear button, live FPS/delay, a **Fit** button (appears only after zooming or panning), and **Expand view / Both cameras**. On narrow windows the FPS readout, then the title, are hidden first.
+- **The area outside the ROI is shaded**, so it is obvious what YOLO ignores. While dragging, a live readout shows the selection size in native pixels.
+- Hovering over the video briefly shows the mouse gestures: drag sets the ROI, right-drag pans, the wheel zooms, double-click clears the ROI.
+- The **Waiting for video** card shows the multicast group, port and interface. **Stream stalled** (after 0.5 s) and **No signal** (after 3 s) dim the last image and hide detections, because boxes on a frozen frame would be misleading for a moving belt.
+- The FPS/delay HUD no longer covers the server's burned-in LEFT/RIGHT label.
+
+### Chart and Diagnostics
+
+- The chart shades the provisional watch/high bands (± bands for skew), labels the mean line, fades the area under the line, labels the x-axis in positive "frames ago", and shows a value readout with a crosshair on hover. 100/500/2000-frame windows and pause are segmented controls.
+- Diagnostics labels the original 168-bit barcode by protocol field: magic, version, left UTC, sequence, skew and CRC, each with its decoded value. It also shows the latest decode error text and a grid with the timestamps, delay/skew, clock offset/RTT/last sync, UDP packets/s and YOLO status. It scrolls when space is short.
+
+### Image adjustments panel
+
+Opens under its button and always stays inside the window/screen. Controls are grouped as Exposure and White balance, with a cool/warm and magenta/green gradient on the white-balance sliders and direction words in the values (e.g. `-18 cool`). Double-click a slider to reset it. **Apply adjustments** is an on/off switch (use it for before/after comparison). The **Adjust image** button is highlighted while adjustments are active.
+
+### Keyboard
+
+`1` both · `2` left · `3` right · `F` full screen · `Esc` maximized · **`D` toggle Diagnostics** (new) · **`P` pause chart** (new).
+
+### Verify on the receiver
+
+1. `python client/stereo_vision_client_qt.py --self-test` (now also checks the overlays, ROI shading, KPI states and analysis tabs).
+2. Start without the server running: both tiles show **Waiting for video** with the correct group/port/interface, and **Stream** reads *Waiting*.
+3. Start the server: video fills both tiles without black bands. **Stream / Clock / YOLO / Data** turn green and the KPIs read *OK* if delay is under 150 ms.
+4. Draw an ROI on each camera; check the shaded outside area, the header size, **×** clear and double-click clear. Zoom with the wheel; **Fit** appears and resets the view.
+5. Stop the server for ~5 s: *Stream stalled* then *No signal*, detections disappear, KPIs show *Stale*; restart and confirm recovery.
+6. Press `D`: barcode fields decode, CRC shows *valid*, counters match. Press `P` and hover the chart.
+7. Repeat at 1366×768 and with Windows scaling at 125 %/150 %; capture screenshots if anything clips.
+8. Compare receiver FPS and delay against the previous build on the same LAN; the per-frame path is unchanged apart from detection colouring.
