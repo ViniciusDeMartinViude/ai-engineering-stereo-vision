@@ -85,12 +85,16 @@ class DelayAxis(pg.AxisItem):
             self.update()
 
     def tickSpacing(self, minVal, maxVal, size):
-        # One tick level (the finer standard one): every label uses the same
-        # format, instead of alternating '20' / '25.0' between levels.
+        # One tick level, so every label uses the same format (no alternating
+        # '20' / '25.0'): the finest standard level whose labels stay at least
+        # ~40 px apart at the axis' current height.
         levels = super().tickSpacing(minVal, maxVal, size)
-        if size < 180:  # short charts: the coarse level keeps labels apart
-            return levels[:1]
-        return levels[1:2] or levels[:1]
+        span = abs(maxVal - minVal)
+        chosen = levels[:1]
+        for spacing, offset in levels:  # coarse to fine
+            if span and size * spacing / span >= 40:
+                chosen = [(spacing, offset)]
+        return chosen
 
     def tickStrings(self, values, scale, spacing):
         divisor = 1000.0 if self.unit == 's' else 1.0
@@ -1271,9 +1275,16 @@ class Studio(QtWidgets.QMainWindow):
             f'Clock offset {offset_ms:+.2f} ms; '
             f'RTT {rtt_ms:.2f} ms ({count} samples); resync every 5 s')
         # Existing samples were calculated against the previous correction.
-        # A material correction should not mix old/new clock bases in KPIs.
-        if abs(self.clock_offset - previous_offset) >= 1.0:
+        # Re-express them against the new one instead of discarding them: the
+        # KPIs keep a single clock basis and the history chart keeps sliding
+        # rather than restarting at every resync.
+        delta = self.clock_offset - previous_offset
+        if delta:
+            shifted = [age - delta for age in self.age_samples]
             self.age_samples.clear()
+            self.age_samples.extend(shifted)  # same deque: the chart keeps its reference
+            if self.last_age_ms is not None:
+                self.last_age_ms -= delta
 
     def _start_services(self):
         if self.args.no_time_sync:
@@ -1502,19 +1513,37 @@ def self_test():
     import types
     # Repeated SNTP corrections must be absolute, never cumulative.
     dummy_args = types.SimpleNamespace(clock_offset_ms=3.0, no_time_sync=False)
+    history = collections.deque([10.0, 20.0], maxlen=2000)
     dummy = types.SimpleNamespace(
         _sync_future=concurrent.futures.Future(), _closing=False,
-        args=dummy_args, clock_offset=3.0, age_samples=collections.deque([10.0]),
+        args=dummy_args, clock_offset=3.0, age_samples=history, last_age_ms=20.0,
         sync_rtt=None, sync_sample_count=0, last_clock_sync_mono=None,
         clock_sync_error=None, clock_status='')
     dummy._sync_future.set_result((11.0, 0.3, 7))
     Studio._poll_clock_sync(dummy)
     assert dummy.clock_offset == 14.0
-    assert not dummy.age_samples
+    # History is re-based on the new correction (not cleared), in the same deque.
+    assert list(dummy.age_samples) == [-1.0, 9.0] and dummy.last_age_ms == 9.0
+    assert dummy.age_samples is history
     dummy._sync_future = concurrent.futures.Future()
     dummy._sync_future.set_result((12.0, 0.2, 7))
     Studio._poll_clock_sync(dummy)
     assert dummy.clock_offset == 15.0, 'NTP offset must not accumulate'
+    assert list(dummy.age_samples) == [-2.0, 8.0]
+    # The history chart is a strip chart: the axis spans the window from the
+    # first frame, and once full the data slides instead of restarting.
+    strip = LatencyChart(DelayAxis)
+    samples = collections.deque((float(v) for v in range(10)), maxlen=2000)
+    strip.update_samples(samples, samples)
+    assert strip.plot.getViewBox().viewRange()[0][0] < -98, 'axis spans the whole window'
+    samples.extend(float(v) for v in range(10, 150))
+    strip.update_samples(samples, samples)
+    oldest = strip._ydata[0]
+    samples.append(150.0)
+    strip.update_samples(samples, samples)
+    assert strip._display_count == 100
+    assert strip._ydata[0] == oldest + 1 and strip._ydata[99] == 150.0, 'slides by one frame'
+    assert strip.plot.getViewBox().viewRange()[0][0] < -98
     # Pixel adjustments must affect video but never modify embedded CRC.
     raw = np.zeros((120, 16, 3), dtype=np.uint8)
     raw[:20] = 80

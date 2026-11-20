@@ -670,7 +670,9 @@ class LatencyChart(QtWidgets.QWidget):
             desired_top = max(20.0, vmax * 1.3)
         # Fast expansion, slow reduction to prevent visual jumping.
         self.high_envelope = max(desired_top, self.high_envelope * .985)
-        self.plot.setXRange(-max(1, count - 1), 0, padding=0.01)
+        # Strip chart: the axis always spans the selected window. New frames
+        # enter at the right and the history slides left; it never rescales.
+        self.plot.setXRange(-(self.samples_limit - 1), 0, padding=0.01)
         self.plot.setYRange(floor, max(floor + 1, self.high_envelope), padding=0)
         self._axis_changed()
         if self._last_mouse is not None:

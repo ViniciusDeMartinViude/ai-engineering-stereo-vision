@@ -140,7 +140,7 @@ Test both camera views with and without YOLO, then select a new ROI while zoomed
 
 The Qt client now measures its client-minus-server clock offset **on startup and every 5 seconds** using the existing `common/lan_ntp.py` SNTP estimator (`--time-server`, `--ntp-port`, `--ntp-samples`). Measurements run in a single background executor, not on the GUI thread. If a measurement takes longer than the interval, it is not duplicated or queued.
 
-Every successful result **replaces**, rather than adds to, the prior correction: `effective_offset_ms = --clock-offset-ms + latest_ntp_offset_ms`. This is required to avoid manufactured clock drift. Video timestamps and the latency calculation continue to use their original formulas. If a correction differs by 1 ms or more, the recent delay history is cleared so the average/P95 do not mix samples computed against different clock offsets.
+Every successful result **replaces**, rather than adds to, the prior correction: `effective_offset_ms = --clock-offset-ms + latest_ntp_offset_ms`. This is required to avoid manufactured clock drift. Video timestamps and the latency calculation continue to use their original formulas. When the correction changes, the stored delay history is **re-expressed against the new correction** (each sample shifts by the change in offset) instead of being cleared, so the average/P95 keep a single clock basis and the delay chart keeps sliding rather than restarting at every resync. (Earlier builds cleared the history whenever a correction moved by 1 ms or more, which on a real LAN restarted the chart every few resyncs.)
 
 If no NTP response arrives, the client keeps using the last successful correction and reports unavailable/stale synchronization in the clock status. Once the last successful sample is older than 15 seconds, the chip reads **SYNC STALE**; successful measurements restore the synced status. `--no-time-sync` skips all periodic NTP work.
 
@@ -207,7 +207,7 @@ A visual pass over the whole Qt client. Streaming, timestamp decoding, SNTP, YOL
 
 ### Chart and Diagnostics
 
-- The chart shades the provisional watch/high bands (± bands for skew), labels the mean line, fades the area under the line, labels the x-axis in positive "frames ago", and shows a value readout with a crosshair on hover. 100/500/2000-frame windows and pause are segmented controls.
+- The chart shades the provisional watch/high bands (± bands for skew), labels the mean line, fades the area under the line, labels the x-axis in positive "frames ago", and shows a value readout with a crosshair on hover. 100/500/2000-frame windows and pause are segmented controls. It is a strip chart: the x-axis always spans the selected window, new frames enter at the right and the history slides left once the window is full.
 - Diagnostics labels the original 168-bit barcode by protocol field: magic, version, left UTC, sequence, skew and CRC, each with its decoded value. It also shows the latest decode error text and a grid with the timestamps, delay/skew, clock offset/RTT/last sync, UDP packets/s and YOLO status. It scrolls when space is short.
 
 ### Image adjustments panel
