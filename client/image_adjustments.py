@@ -70,6 +70,40 @@ def apply_to_stereo_frame(frame: np.ndarray, lut: np.ndarray | None,
     return output
 
 
+class DraggablePanelHeader(QtWidgets.QWidget):
+    """Drag a frameless dialog by its title strip; leave its buttons interactive."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_offset = None
+        self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag here to move the image adjustments panel")
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            dialog = self.window()
+            self._drag_offset = event.globalPosition().toPoint() - dialog.frameGeometry().topLeft()
+            self.setCursor(QtCore.Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & QtCore.Qt.MouseButton.LeftButton:
+            self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._drag_offset = None
+            self.setCursor(QtCore.Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ImageAdjustmentsDialog(QtWidgets.QDialog):
     """Translucent non-blocking floating adjustment panel.
 
@@ -108,9 +142,13 @@ class ImageAdjustmentsDialog(QtWidgets.QDialog):
         root.setContentsMargins(17, 14, 17, 14)
         root.setSpacing(9)
 
-        header = QtWidgets.QHBoxLayout()
+        self.drag_header = DraggablePanelHeader(self.card)
+        header = QtWidgets.QHBoxLayout(self.drag_header)
+        header.setContentsMargins(0, 0, 0, 0)
         heading = QtWidgets.QLabel("IMAGE ADJUSTMENTS")
         heading.setObjectName("sectionTitle")
+        # Forward title mouse gestures to the draggable parent, not the sliders.
+        heading.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         header.addWidget(heading)
         header.addStretch()
         close = QtWidgets.QPushButton("✕")
@@ -118,7 +156,7 @@ class ImageAdjustmentsDialog(QtWidgets.QDialog):
         close.setFixedWidth(34)
         close.clicked.connect(self.hide)
         header.addWidget(close)
-        root.addLayout(header)
+        root.addWidget(self.drag_header)
 
         explanation = QtWidgets.QLabel(
             "Client-side processing · both cameras and YOLO\n"
