@@ -279,6 +279,40 @@ def style_sheet():
     }}
     QFrame#divider {{ background-color:{c['border']}; border:0px; max-height:1px; }}
 
+    /* Clickable KPI status badges open the limits dialog */
+    QPushButton#stateBadge {{
+        background:transparent; border:0px; padding:0px 2px; color:{c['muted']};
+    }}
+    QPushButton#stateBadge[state="good"] {{ color:{c['good']}; }}
+    QPushButton#stateBadge[state="warning"] {{ color:{c['warning']}; }}
+    QPushButton#stateBadge[state="bad"] {{ color:{c['bad']}; }}
+    QPushButton#stateBadge:hover {{ text-decoration:underline; }}
+
+    /* Numeric inputs (status limits) */
+    QAbstractSpinBox {{
+        background-color:{c['background']}; color:{c['text']};
+        border:1px solid {c['border_strong']}; border-radius:6px; padding:4px 6px;
+        selection-background-color:{c['accent']}; selection-color:{c['background']};
+    }}
+    QAbstractSpinBox:focus {{ border-color:{c['accent']}; }}
+
+    /* Detections table */
+    QTableView {{
+        background-color:{c['surface']}; alternate-background-color:#151E29;
+        border:0px; gridline-color:{c['border']}; color:{c['text']};
+        selection-background-color:{c['hover']}; selection-color:{c['text']};
+    }}
+    /* Right padding keeps numbers aligned with headers and clear of the sort arrow */
+    QTableView::item {{ padding:0px 20px 0px 8px; border:0px; }}
+    QHeaderView::section {{
+        background-color:{c['raised']}; color:{c['secondary']}; border:0px;
+        border-bottom:1px solid {c['border']}; padding:4px 20px 4px 8px;
+    }}
+    QTableCornerButton::section {{ background-color:{c['raised']}; border:0px; }}
+
+    /* Backdrop behind modal dialogs */
+    QWidget#modalDim {{ background-color:rgba(4, 7, 10, 150); }}
+
     QSplitter::handle {{ background:transparent; }}
     QSplitter::handle:hover {{ background-color:{c['border']}; }}
     QScrollArea, QScrollArea > QWidget > QWidget {{ background:transparent; border:0px; }}

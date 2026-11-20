@@ -216,7 +216,7 @@ Opens under its button and always stays inside the window/screen. Controls are g
 
 ### Keyboard
 
-`1` both · `2` left · `3` right · `F` full screen · `Esc` maximized · **`D` toggle Diagnostics** (new) · **`P` pause chart** (new) · **`L` cycle label presets** (new, see Detection labels below).
+`1` both · `2` left · `3` right · `F` full screen · `Esc` maximized · **`D` toggle Diagnostics** (new) · **`P` pause the chart or detections table** (new) · **`L` cycle label presets** (new, see Detection labels below).
 
 ### Verify on the receiver
 
@@ -254,3 +254,25 @@ Centre and size use the same native camera pixel space as the ROI (YOLO crop off
 3. Open **Labels**, switch **Center (x, y)** on, and compare a label's centre with the ROI header for a box you know; zoom in and check that labels and centre markers keep their screen size.
 4. Turn **Show detections** off: boxes, labels and markers disappear while the camera headers still count objects.
 5. Restart the client: the last label options are restored.
+
+## Status limits (OK / Watch / High)
+
+The limits that colour the KPI cards and shade the charts are configurable per workstation. Open the **Status limits** window from **Limits** in the chart header, or by clicking any KPI status badge (● OK / ▲ Watch / ✕ High). It is modal and dims the window; video and measurements keep updating behind it.
+
+| Metric | Applies to | Default OK below | Default Watch below |
+|---|---|---|---|
+| Frame delay | Average delay, delay P95 and the frame-delay chart | 150 ms | 300 ms |
+| Camera skew \|R − L\| | Smoothed skew and the skew chart (absolute value) | 5 ms | 16 ms |
+
+Readings at or above the Watch limit show **High**. Watch always stays above OK: raising OK past Watch pushes Watch up and vice versa, and values commit on Enter, focus change or the arrow keys rather than while typing. Each metric shows a scale bar with the current reading marked and a line such as `Now: average 125 ms → OK · P95 138 ms → OK`, so the effect is visible before saving. **Save** stores the limits locally (`QSettings`, like the image adjustments and labels), **Cancel**/**Esc** discards, and **Restore defaults** returns to the provisional values in `client/theme.py`. The defaults remain provisional, not validated competition limits.
+
+## Detections tab (single-camera view)
+
+When one camera is expanded (`2`, `3` or **Expand view**), the analysis card gains a **Detections** tab listing that camera's latest YOLO detections: class (with its colour), class ID, confidence, centre x/y, width and height, all in native camera pixels with the origin at the top-left (the same space as the ROI). Rows are sorted left to right by centre x; click a header to sort by another column. **Copy** or **Ctrl+C** copies the selected rows, or all rows, as tab-separated text with a header line, ready to paste into a spreadsheet. **P** (or the pause button) freezes both the table and the chart so values on a moving belt can be read. The tab disappears when returning to both cameras; while it is open the dashboard is slightly taller so more rows fit. If the stream stalls the table is cleared rather than showing stale positions.
+
+### Verify
+
+1. `python client/stereo_vision_client_qt.py --self-test` (checks OK/Watch consistency, defaults, settings round-trip, chart bands, and the Detections tab's visibility, filtering, copying and pausing).
+2. Click the **Average delay** badge, set OK to 100 ms, watch the preview line change, then **Save**: the badge, digits, chart bands and legend update at once. Restart the client and confirm the limits persist; **Restore defaults** brings back 150/300 ms.
+3. Press `2`: the **Detections** tab appears. Open it, compare a row's centre with the label on the video (Labels → Center), press `P`, select rows and press Ctrl+C, then paste into a spreadsheet.
+4. Press `1`: the tab disappears and the card returns to the chart.

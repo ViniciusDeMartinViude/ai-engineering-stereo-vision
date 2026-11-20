@@ -41,6 +41,7 @@ from detection_annotations import (
 from icons import icon, pixmap
 from theme import (COLORS, THRESHOLDS, apply_theme, class_color, display_font,
                    numeric_font, quality, tint, ui_font)
+from status_limits import LimitsDialog, load_thresholds, save_thresholds
 from control_room_widgets import (
     AnalysisCard, StatusChip, TelemetryBar, KpiCard,
     DiagnosticsPanel, LatencyChart, set_state,
@@ -54,6 +55,7 @@ APP_MARGIN = 12
 TILE_HEADER_H = 40
 DASHBOARD_MIN_H = 230
 DASHBOARD_MAX_H = 430
+DETECTIONS_EXTRA_H = 70
 
 
 def fmt_roi(roi):
@@ -664,6 +666,9 @@ class Studio(QtWidgets.QMainWindow):
         self.image_dialog = None
         self.annotation_options = load_annotation_options(self._preferences)
         self.annotation_popover = None
+        # Active OK / Watch / High limits; theme.THRESHOLDS holds only the defaults.
+        self.thresholds = load_thresholds(self._preferences)
+        self.last_detections = ()
         # The raw, signed R-L skew remains unchanged in stats/logs.
         # The instrument uses a 1.5-second time-based EMA.
         self.skew_smoother = ExponentialSmoother(time_constant_seconds=1.5)
@@ -797,36 +802,34 @@ class Studio(QtWidgets.QMainWindow):
         grid = QtWidgets.QGridLayout(kpis)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(APP_MARGIN)
-        t = THRESHOLDS
-        delay_help = (f'Provisional limits: OK below {t.delay_good_below_ms:g} ms, '
-                      f'Watch below {t.delay_warn_below_ms:g} ms, High above.')
-        self.average_delay_card = KpiCard(
-            'Average delay', 'Waiting for valid frames', max_digit_px=92,
-            help_text='Mean NTP-corrected frame delay over the last 100 valid frames.\n' + delay_help)
-        self.delay_p95_card = KpiCard(
-            'Delay P95', 'Last 100 valid frames',
-            help_text='95th percentile of the last 100 valid frame delays; '
-                      'jitter is the standard deviation of consecutive differences.\n' + delay_help)
-        self.skew_card = KpiCard(
-            'Camera skew R−L', 'Smoothed · τ 1.5 s',
-            help_text='Right-minus-left camera timestamp, exponentially smoothed (τ = 1.5 s).\n'
-                      f'Provisional limits: OK below {t.skew_good_below_ms:g} ms, '
-                      f'Watch below {t.skew_warn_below_ms:g} ms.')
+        self.average_delay_card = KpiCard('Average delay', 'Waiting for valid frames', max_digit_px=92)
+        self.delay_p95_card = KpiCard('Delay P95', 'Last 100 valid frames')
+        self.skew_card = KpiCard('Camera skew R−L', 'Smoothed · τ 1.5 s')
+        for card in (self.average_delay_card, self.delay_p95_card, self.skew_card):
+            card.badge_clicked.connect(self._edit_limits)
         grid.addWidget(self.average_delay_card, 0, 0, 1, 2)
         grid.addWidget(self.delay_p95_card, 1, 0)
         grid.addWidget(self.skew_card, 1, 1)
         grid.setRowStretch(0, 11)
         grid.setRowStretch(1, 9)
-        self.analysis = AnalysisCard(DelayAxis)
+        self.analysis = AnalysisCard(DelayAxis, thresholds=self.thresholds)
         self.history = self.analysis.chart
         self.diagnostics = self.analysis.diagnostics
         self.telemetry = self.diagnostics.telemetry
         self.analysis.tab_changed.connect(self._analysis_tab_changed)
+        self.analysis.limits_requested.connect(self._edit_limits)
+        self.analysis.detections.set_enabled(bool(self.args.yolo_model))
+        self._update_limit_tooltips()
         dash.addWidget(kpis, 30)
         dash.addWidget(self.analysis, 70)
         body.addWidget(self.dashboard, stretch=0)
         main.addWidget(self.body, stretch=1)
         self.setCentralWidget(root)
+        # Dims the whole window while a modal dialog (status limits) is open.
+        self._modal_dim = QtWidgets.QWidget(self)
+        self._modal_dim.setObjectName('modalDim')
+        self._modal_dim.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._modal_dim.hide()
         # No persistent footer: shortcuts are listed in tooltips and the video hint.
         self.statusBar().hide()
         self.change_view('both')
@@ -948,6 +951,8 @@ class Studio(QtWidgets.QMainWindow):
         self._equalize_pending = mode == 'both'
         self.left_panel.set_view_mode(mode)
         self.right_panel.set_view_mode(mode)
+        # The Detections tab lists the expanded camera, so it exists only in single view.
+        self.analysis.set_detections_side(None if mode == 'both' else mode)
         self._schedule_layout()
 
     def _schedule_layout(self, *args):
@@ -990,7 +995,9 @@ class Studio(QtWidgets.QMainWindow):
             tile_w = inner_w
         w, h = max(visible, key=lambda p: p.width()).native_shape
         tile_h = (tile_w - 2) * h / max(1, w) + TILE_HEADER_H + 2
-        dash_h = int(max(DASHBOARD_MIN_H, min(DASHBOARD_MAX_H, 0.45 * inner_h, inner_h - tile_h)))
+        # The detections table needs a few more rows than the chart to be useful.
+        minimum = DASHBOARD_MIN_H + (DETECTIONS_EXTRA_H if self.analysis.current == 'detections' else 0)
+        dash_h = int(max(minimum, min(DASHBOARD_MAX_H, 0.45 * inner_h, inner_h - tile_h)))
         if self.dashboard.height() != dash_h or self.dashboard.minimumHeight() != dash_h:
             self.dashboard.setFixedHeight(dash_h)
 
@@ -1000,12 +1007,72 @@ class Studio(QtWidgets.QMainWindow):
         # ROI coordinates are already shown directly in the camera header.
 
     def _analysis_tab_changed(self, tab):
+        self._schedule_layout()  # the Detections tab asks for a taller dashboard
         if tab == 'diagnostics':
             self._refresh_diagnostics(time.monotonic())
             if self.last_recv_frame is not None:
                 self.diagnostics.update_barcode(self.last_recv_frame)
+        elif tab == 'detections':
+            self._refresh_detections(self._stream_frozen(time.monotonic()))
         else:
             self.last_chart_update = 0.0
+
+    def _stream_frozen(self, now):
+        return (self.last_frame_monotonic is not None
+                and now - self.last_frame_monotonic >= self.thresholds.stale_after_s)
+
+    def _refresh_detections(self, frozen):
+        self.analysis.detections.set_detections(self.last_detections, stale=frozen)
+
+    def _kpi_values(self):
+        """(mean, p95, jitter, samples) over the last 100 valid frame delays, or None."""
+        if not self.age_samples:
+            return None
+        values = np.asarray(list(self.age_samples)[-100:], dtype=float)
+        jitter = float(np.std(np.diff(values))) if len(values) > 1 else 0.0
+        return float(np.mean(values)), float(np.percentile(values, 95)), jitter, values
+
+    def _update_limit_tooltips(self):
+        t = self.thresholds
+        delay = (f'OK below {t.delay_good_below_ms:g} ms · Watch below {t.delay_warn_below_ms:g} ms · '
+                 'High at or above.')
+        edit = '\nClick the status badge to edit the limits.'
+        self.average_delay_card.setToolTip(
+            'Mean NTP-corrected frame delay over the last 100 valid frames.\n' + delay + edit)
+        self.delay_p95_card.setToolTip(
+            '95th percentile of the last 100 valid frame delays; jitter is the standard '
+            'deviation of consecutive differences.\n' + delay + edit)
+        self.skew_card.setToolTip(
+            'Right-minus-left camera timestamp, exponentially smoothed (τ = 1.5 s).\n'
+            f'|skew| OK below {t.skew_good_below_ms:g} ms · Watch below {t.skew_warn_below_ms:g} ms · '
+            'High at or above.' + edit)
+
+    def _edit_limits(self):
+        """Modal OK / Watch / High editor over a dimmed window; video keeps updating."""
+        kpi = self._kpi_values()
+        current = {'average': kpi[0] if kpi else None, 'p95': kpi[1] if kpi else None,
+                   'skew': self.skew_smoother.value}
+        dialog = LimitsDialog(self.thresholds, current, self)
+        dialog.adjustSize()
+        frame = self.frameGeometry()
+        dialog.move(frame.center() - dialog.rect().center())
+        self._modal_dim.setGeometry(self.rect())
+        self._modal_dim.raise_()
+        self._modal_dim.show()
+        try:
+            accepted = dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted
+        finally:
+            self._modal_dim.hide()
+        if accepted:
+            self._apply_thresholds(dialog.thresholds)
+
+    def _apply_thresholds(self, thresholds, save=True):
+        self.thresholds = thresholds
+        self.analysis.set_thresholds(thresholds)
+        self._update_limit_tooltips()
+        if save:
+            save_thresholds(self._preferences, thresholds)
+        self._refresh_metrics()
 
     def _refresh_metrics(self):
         """10 Hz status/KPI cadence; raw image path remains frame-driven."""
@@ -1029,11 +1096,13 @@ class Studio(QtWidgets.QMainWindow):
         self.diagnostics.update_counts(self.valid, self.invalid, self.missing)
         if self.diagnostics.contents.isVisible():
             self._refresh_diagnostics(now)
-        frozen = stale_for is not None and stale_for >= THRESHOLDS.stale_after_s
+        frozen = stale_for is not None and stale_for >= self.thresholds.stale_after_s
+        if self.analysis.current == 'detections':
+            self._refresh_detections(frozen)
         self._refresh_kpis(now, frozen)
 
     def _refresh_stream_chip(self, stale_for, fps):
-        t = THRESHOLDS
+        t = self.thresholds
         detail = (f'{self._listen_text()}\n'
                   f'{self.packet_rate:.0f} UDP packets/s · {self.last_count:,} frames decoded')
         if self.stream_error:
@@ -1093,7 +1162,7 @@ class Studio(QtWidgets.QMainWindow):
             self.yolo_chip.display('good', 'Ready', detail)
 
     def _refresh_data_chip(self, now):
-        window = THRESHOLDS.recent_error_window_s
+        window = self.thresholds.recent_error_window_s
         while self.recent_errors and now - self.recent_errors[0][0] > window:
             self.recent_errors.popleft()
         recent = sum(count for _, count in self.recent_errors)
@@ -1109,14 +1178,12 @@ class Studio(QtWidgets.QMainWindow):
             self.data_chip.display('good', 'CRC OK', detail)
 
     def _refresh_kpis(self, now, frozen=False):
-        """KPI readings coloured by provisional thresholds; greyed as 'Stale'
+        """KPI readings coloured by this workstation's limits; greyed as 'Stale'
         while no frames arrive, so an old green reading never looks live."""
-        t = THRESHOLDS
-        if self.age_samples:
-            values = np.asarray(list(self.age_samples)[-100:], dtype=float)
-            mean = float(np.mean(values))
-            p95 = float(np.percentile(values, 95))
-            jitter = float(np.std(np.diff(values))) if len(values) > 1 else 0.0
+        t = self.thresholds
+        kpi = self._kpi_values()
+        if kpi is not None:
+            mean, p95, jitter, values = kpi
             self.average_delay_card.set_value(
                 mean, state='stale' if frozen else quality(mean, t.delay_good_below_ms, t.delay_warn_below_ms),
                 secondary=f'Last {len(values)} valid frames · {np.min(values):.0f}–{np.max(values):.0f} ms')
@@ -1128,7 +1195,7 @@ class Studio(QtWidgets.QMainWindow):
             self.skew_card.set_value(
                 skew, state='stale' if frozen else quality(skew, t.skew_good_below_ms, t.skew_warn_below_ms),
                 secondary=f'EMA τ 1.5 s · last {self.last_skew_ms:+.2f} ms')
-        if ((self.age_samples or self.skew_samples) and self.analysis.current != 'diagnostics'
+        if ((self.age_samples or self.skew_samples) and self.analysis.current in AnalysisCard.CHART_TABS
                 and now - self.last_chart_update >= 0.1):
             self.history.update_samples(self.age_samples, self.skew_samples)
             self.last_chart_update = now
@@ -1264,14 +1331,12 @@ class Studio(QtWidgets.QMainWindow):
             detections, status, result_id, result_mono, ms, error = self.yolo.snapshot()
             self.last_yolo_status = status
             self.last_yolo_ms = ms
-            if result_mono and time.monotonic()-result_mono < 1.0:
-                self.last_detection_count = len(detections)
-                self.left_panel.set_detections(detections)
-                self.right_panel.set_detections(detections)
-            else:
-                self.last_detection_count = 0
-                self.left_panel.set_detections(())
-                self.right_panel.set_detections(())
+            if not (result_mono and time.monotonic()-result_mono < 1.0):
+                detections = ()  # stale results are hidden everywhere
+            self.last_detections = tuple(detections)
+            self.last_detection_count = len(detections)
+            self.left_panel.set_detections(detections)
+            self.right_panel.set_detections(detections)
         stamp, err = decode_strip(frame)
         diagnostics_open = self.diagnostics.contents.isVisible()
         if stamp is not None:
@@ -1499,7 +1564,50 @@ def self_test():
     assert popover.custom_note.isVisibleTo(popover)
     popover.presets.select('minimal')
     assert emitted[-1] == PRESETS['minimal'] and not popover._switches['confidence'].isChecked()
-    print('PASS: Qt control-room, ROI, timing, image adjustments and detection labels')
+    # Status limits: OK stays below Watch, defaults restore, settings round-trip, bands follow.
+    limits = LimitsDialog(THRESHOLDS, {'average': 124.0, 'p95': 138.0, 'skew': 3.6})
+    ok_spin, watch_spin, *_ = limits._spins['delay']
+    ok_spin.setValue(320.0)
+    assert watch_spin.value() > ok_spin.value(), 'raising OK past Watch pushes Watch up'
+    watch_spin.setValue(100.0)
+    assert ok_spin.value() < watch_spin.value(), 'lowering Watch below OK pushes OK down'
+    assert 'High' in limits._now['delay'].text(), 'preview reclassifies the current reading'
+    limits.restore_defaults()
+    assert limits.thresholds == THRESHOLDS
+    import os
+    import tempfile
+    custom = dataclasses.replace(THRESHOLDS, delay_good_below_ms=200.0, delay_warn_below_ms=400.0)
+    with tempfile.TemporaryDirectory() as folder:
+        store = QtCore.QSettings(os.path.join(folder, 'limits.ini'), QtCore.QSettings.Format.IniFormat)
+        save_thresholds(store, custom)
+        assert load_thresholds(store) == custom
+        store.setValue('limits/skew_good_below_ms', 50.0)  # now above Watch: invalid pair
+        assert load_thresholds(store).skew_good_below_ms == THRESHOLDS.skew_good_below_ms
+        store.sync()
+        del store
+    analysis.show_tab('delay')
+    analysis.set_thresholds(custom)
+    assert analysis.chart.bands['warn_hi'].getRegion() == (200.0, 400.0)
+    assert '≥ 200 ms' in analysis.legend.text()
+    # Detections tab: single-camera view only, rows for that camera, frozen while paused.
+    assert not analysis.tabs.buttons['detections'].isVisibleTo(analysis)
+    analysis.set_detections_side('left')
+    assert analysis.tabs.buttons['detections'].isVisibleTo(analysis)
+    analysis.show_tab('detections')
+    assert analysis.stack.currentWidget() is analysis.detections
+    table = analysis.detections.table
+    other = Detection('RIGHT', 'can', 0.5, (0.0, 0.0, 10.0, 10.0), 1)
+    analysis.detections.set_detections([det, other])
+    assert table.rowCount() == 1 and table.item(0, 3).text() == '200'
+    assert 'box\t2\t94%\t200\t120\t200\t140' in table.copy_rows()
+    analysis.toggle_pause()
+    analysis.detections.set_detections([])
+    assert table.rowCount() == 1, 'a paused table keeps its rows'
+    analysis.toggle_pause()
+    analysis.set_detections_side(None)
+    assert analysis.current == 'delay' and not analysis.tabs.buttons['detections'].isVisibleTo(analysis)
+    print('PASS: Qt control-room, ROI, timing, image adjustments, detection labels, '
+          'status limits and detections table')
     return 0
 
 

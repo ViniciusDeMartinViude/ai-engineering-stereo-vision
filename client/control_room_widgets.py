@@ -12,7 +12,7 @@ from icons import icon
 from seven_segment import SevenSegmentDisplay
 from stamp_protocol import extract_strip
 from theme import (COLORS, STATE_COLORS, STATE_MARKS, STATE_WORDS, THRESHOLDS,
-                   display_font, numeric_font, tint, ui_font)
+                   class_color, display_font, numeric_font, tint, ui_font)
 
 
 def set_state(widget, state):
@@ -297,9 +297,15 @@ class KpiCard(QtWidgets.QFrame):
         header = QtWidgets.QHBoxLayout()
         header.setSpacing(6)
         self.name = overline(title)
-        self.badge = QtWidgets.QLabel()
+        # The badge doubles as the entry point for editing the OK/Watch/High limits.
+        self.badge = QtWidgets.QPushButton()
         self.badge.setObjectName('stateBadge')
         self.badge.setFont(display_font(11))
+        self.badge.setFlat(True)
+        self.badge.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        self.badge.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.badge.setToolTip('Edit the OK / Watch / High limits')
+        self.badge_clicked = self.badge.clicked
         header.addWidget(self.name)
         header.addStretch()
         header.addWidget(self.badge)
@@ -494,12 +500,13 @@ class LatencyChart(QtWidgets.QWidget):
                  'mean': 'mean {value:+.1f} ms', 'value': '{:+.2f} ms'},
     }
 
-    def __init__(self, axis_cls, parent=None):
+    def __init__(self, axis_cls, parent=None, thresholds=THRESHOLDS):
         super().__init__(parent)
         self.samples_limit = 100
         self.paused = False
         self.mode = 'delay'
         self.high_envelope = 500.0
+        self.thresholds = thresholds
         self._sources = ((), ())
         self._last_mouse = None
         main = QtWidgets.QVBoxLayout(self)
@@ -589,6 +596,11 @@ class LatencyChart(QtWidgets.QWidget):
     def set_paused(self, paused: bool):
         self.paused = bool(paused)
 
+    def set_thresholds(self, thresholds):
+        """New OK/Watch/High limits: redraw the bands and rescale at once."""
+        self.thresholds = thresholds
+        self.set_mode(self.mode)
+
     def set_mode(self, mode):
         self.mode = mode
         spec = self.MODES[mode]
@@ -599,7 +611,7 @@ class LatencyChart(QtWidgets.QWidget):
         self.high_envelope = 500.0 if mode == 'delay' else 30.0
         self._display_count = 0
         self.axis.enableAutoSIPrefix(False)
-        t = THRESHOLDS
+        t = self.thresholds
         if mode == 'delay':
             self.axis.unit = 'ms'
             self.axis.setLabel('Delay (ms)', color=COLORS['secondary'], size='10pt')
@@ -652,9 +664,9 @@ class LatencyChart(QtWidgets.QWidget):
         vmax = float(np.max(self._ydata[:count]))
         if self.mode == 'delay':
             floor = 0.0
-            desired_top = max(vmax * 1.2, THRESHOLDS.delay_good_below_ms * 1.15)
+            desired_top = max(vmax * 1.2, self.thresholds.delay_good_below_ms * 1.15)
         else:
-            floor = min(-THRESHOLDS.skew_good_below_ms * 1.5, vmin * 1.3)
+            floor = min(-self.thresholds.skew_good_below_ms * 1.5, vmin * 1.3)
             desired_top = max(20.0, vmax * 1.3)
         # Fast expansion, slow reduction to prevent visual jumping.
         self.high_envelope = max(desired_top, self.high_envelope * .985)
@@ -694,15 +706,168 @@ class LatencyChart(QtWidgets.QWidget):
         self.hover_label.show()
 
 
+class _NumberItem(QtWidgets.QTableWidgetItem):
+    """Table cell that shows formatted text but sorts by its numeric value."""
+    def __init__(self, value, text):
+        super().__init__(text)
+        self.setData(QtCore.Qt.ItemDataRole.UserRole, float(value))
+        self.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+    def __lt__(self, other):
+        return (self.data(QtCore.Qt.ItemDataRole.UserRole)
+                < other.data(QtCore.Qt.ItemDataRole.UserRole))
+
+
+class DetectionTable(QtWidgets.QTableWidget):
+    """Read-only table; Ctrl+C copies the selected rows (or all) as tab-separated text."""
+    def keyPressEvent(self, event):
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self.copy_rows()
+            return
+        super().keyPressEvent(event)
+
+    def copy_rows(self):
+        rows = sorted({index.row() for index in self.selectedIndexes()}) or range(self.rowCount())
+        columns = range(self.columnCount())
+        lines = ['\t'.join(self.horizontalHeaderItem(c).text() for c in columns)]
+        for r in rows:
+            lines.append('\t'.join(self.item(r, c).text() if self.item(r, c) else '' for c in columns))
+        text = '\n'.join(lines)
+        QtWidgets.QApplication.clipboard().setText(text)
+        return text
+
+
+class DetectionsPanel(QtWidgets.QWidget):
+    """Detections of the expanded camera: class, ID, confidence, centre and size."""
+    COLUMNS = ('Class', 'ID', 'Confidence', 'Center x', 'Center y', 'Width', 'Height')
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.paused = False
+        self.side = 'LEFT'
+        self.enabled = True
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(6)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(10)
+        self.caption = QtWidgets.QLabel()
+        self.caption.setObjectName('secondary')
+        self.caption.setFont(ui_font(12, QtGui.QFont.Weight.DemiBold))
+        self.note = QtWidgets.QLabel('Native camera pixels, origin top-left · click a header to sort')
+        self.note.setObjectName('caption')
+        self.note.setFont(ui_font(12))
+        self.copy_button = QtWidgets.QPushButton('Copy')
+        self.copy_button.setObjectName('flat')
+        self.copy_button.setIcon(icon('copy', COLORS['secondary']))
+        self.copy_button.setIconSize(QtCore.QSize(14, 14))
+        self.copy_button.setToolTip('Copy the selected rows (or all rows) as tab-separated text · Ctrl+C')
+        top.addWidget(self.caption)
+        top.addStretch()
+        top.addWidget(self.note)
+        top.addWidget(self.copy_button)
+        layout.addLayout(top)
+        self.table = DetectionTable(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.horizontalHeader().setFont(display_font(11))
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setDefaultAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.table.horizontalHeaderItem(0).setTextAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setFont(numeric_font(13))
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(3, QtCore.Qt.SortOrder.AscendingOrder)  # along the belt, left to right
+        self.placeholder = QtWidgets.QLabel()
+        self.placeholder.setObjectName('caption')
+        self.placeholder.setFont(ui_font(13))
+        self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.views = QtWidgets.QStackedWidget()
+        self.views.addWidget(self.table)
+        self.views.addWidget(self.placeholder)
+        layout.addWidget(self.views, 1)
+        self.copy_button.clicked.connect(self.table.copy_rows)
+        self.set_detections((), stale=False)
+
+    def set_side(self, side: str):
+        self.side = side.upper()
+        self._update_caption(self.table.rowCount())
+
+    def set_paused(self, paused: bool):
+        self.paused = bool(paused)
+        self._update_caption(self.table.rowCount())
+
+    def set_enabled(self, enabled: bool):
+        self.enabled = bool(enabled)
+
+    def set_detections(self, detections, stale=False):
+        """Rows for this camera's latest detections; frozen while paused."""
+        if self.paused:
+            return
+        if not self.enabled:
+            self._show_placeholder('Detection is off · start the client with --yolo-model')
+            return
+        if stale:
+            self.table.setRowCount(0)
+            self._show_placeholder('Stream stalled · no live detections')
+            return
+        rows = [d for d in detections if d.side == self.side]
+        sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for r, d in enumerate(rows):
+            x1, y1, x2, y2 = d.xyxy
+            cx, cy = d.center
+            name = QtWidgets.QTableWidgetItem(d.label)
+            name.setData(QtCore.Qt.ItemDataRole.DecorationRole, QtGui.QColor(class_color(d.label)))
+            name.setFont(ui_font(13, QtGui.QFont.Weight.DemiBold))
+            self.table.setItem(r, 0, name)
+            cells = ((d.class_id, f'{d.class_id}' if d.class_id >= 0 else '—'),
+                     (d.confidence, f'{d.confidence:.0%}'),
+                     (cx, f'{cx:.0f}'), (cy, f'{cy:.0f}'),
+                     (x2 - x1, f'{x2 - x1:.0f}'), (y2 - y1, f'{y2 - y1:.0f}'))
+            for c, (value, text) in enumerate(cells, start=1):
+                self.table.setItem(r, c, _NumberItem(value, text))
+        self.table.setSortingEnabled(sorting)
+        if rows:
+            self.views.setCurrentWidget(self.table)
+            self._update_caption(len(rows))
+        else:
+            self._show_placeholder('No detections in the latest result')
+
+    def _show_placeholder(self, message):
+        self.placeholder.setText(message)
+        self.views.setCurrentWidget(self.placeholder)
+        self._update_caption(0)
+
+    def _update_caption(self, count):
+        objects = 'no objects' if not count else ('1 object' if count == 1 else f'{count} objects')
+        text = f'{self.side.title()} camera · {objects}' + (' · paused' if self.paused else '')
+        if self.caption.text() != text:
+            self.caption.setText(text)
+
+
 class AnalysisCard(QtWidgets.QFrame):
-    """Delay history, skew history and diagnostics behind one tab control."""
+    """Delay and skew history, detections (single-camera view) and diagnostics as tabs."""
     tab_changed = QtCore.Signal(str)
+    limits_requested = QtCore.Signal()
     TABS = (('delay', 'Frame delay', 'NTP-corrected frame delay history · raw samples'),
             ('skew', 'Camera skew', 'Right-minus-left camera timestamp history · raw samples'),
+            ('detections', 'Detections',
+             'Class, ID, confidence, centre and size of every detection in the expanded camera'),
             ('diagnostics', 'Diagnostics',
              'Timestamp barcode, CRC counters, clock and link details · shortcut D'))
+    CHART_TABS = ('delay', 'skew')
+    PAUSABLE_TABS = ('delay', 'skew', 'detections')
 
-    def __init__(self, axis_cls, parent=None):
+    def __init__(self, axis_cls, parent=None, thresholds=THRESHOLDS):
         super().__init__(parent)
         self.setObjectName('card')
         layout = QtWidgets.QVBoxLayout(self)
@@ -717,8 +882,13 @@ class AnalysisCard(QtWidgets.QFrame):
         self.legend = QtWidgets.QLabel()
         self.legend.setObjectName('legend')
         self.legend.setFont(ui_font(12))
-        self.legend.setToolTip('Provisional display thresholds from client/theme.py; '
-                               'not validated competition limits.')
+        self.legend.setToolTip('Status limits for this workstation · edit them with Limits')
+        self.limits_button = QtWidgets.QPushButton('Limits')
+        self.limits_button.setObjectName('flat')
+        self.limits_button.setIcon(icon('gauge', COLORS['secondary']))
+        self.limits_button.setIconSize(QtCore.QSize(16, 16))
+        self.limits_button.setToolTip('Edit the OK / Watch / High limits')
+        self.limits_button.clicked.connect(self.limits_requested)
         self.window = SegmentedControl((('100', '100', 'Show the last 100 frames'),
                                         ('500', '500', 'Show the last 500 frames'),
                                         ('2000', '2000', 'Show the last 2000 frames')))
@@ -729,23 +899,26 @@ class AnalysisCard(QtWidgets.QFrame):
         self.pause.setCheckable(True)
         self.pause.setIcon(icon('pause', COLORS['secondary']))
         self.pause.setIconSize(QtCore.QSize(16, 16))
-        self.pause.setToolTip('Pause the chart · shortcut P')
+        self.pause.setToolTip('Pause updates · shortcut P')
         row.addWidget(self.tabs)
         row.addSpacing(6)
         row.addWidget(self.legend)
+        row.addWidget(self.limits_button)
         row.addStretch()
         row.addWidget(self.window)
         row.addWidget(self.window_caption)
         row.addWidget(self.pause)
         layout.addWidget(header)
         self.stack = QtWidgets.QStackedWidget()
-        self.chart = LatencyChart(axis_cls)
+        self.chart = LatencyChart(axis_cls, thresholds=thresholds)
+        self.detections = DetectionsPanel()
         self.diagnostics = DiagnosticsPanel()
-        self.stack.addWidget(self.chart)
-        self.stack.addWidget(self.diagnostics)
+        for page in (self.chart, self.detections, self.diagnostics):
+            self.stack.addWidget(page)
         layout.addWidget(self.stack, 1)
         self.current = None
         self._last_chart_tab = 'delay'
+        self.tabs.buttons['detections'].hide()  # single-camera view only
         self.tabs.selected.connect(self.show_tab)
         self.window.selected.connect(lambda value: self.chart.set_window(int(value)))
         self.pause.toggled.connect(self._set_paused)
@@ -757,18 +930,37 @@ class AnalysisCard(QtWidgets.QFrame):
         self.current = key
         if self.tabs.current != key:
             self.tabs.select(key, emit=False)
-        chart_tab = key in ('delay', 'skew')
+        chart_tab = key in self.CHART_TABS
         if chart_tab:
             self._last_chart_tab = key
             self.chart.set_mode(key)
             self.stack.setCurrentWidget(self.chart)
+        elif key == 'detections':
+            self.stack.setCurrentWidget(self.detections)
         else:
             self.stack.setCurrentWidget(self.diagnostics)
-        for widget in (self.window, self.window_caption, self.pause):
+        for widget in (self.window, self.window_caption, self.limits_button):
             widget.setVisible(chart_tab)
+        self.pause.setVisible(key in self.PAUSABLE_TABS)
         self._update_legend()
         if emit:
             self.tab_changed.emit(key)
+
+    def set_detections_side(self, side):
+        """'left' / 'right' shows the Detections tab for that camera; None hides it."""
+        button = self.tabs.buttons['detections']
+        if side is None:
+            if self.current == 'detections':
+                self.show_tab(self._last_chart_tab)
+            button.hide()
+        else:
+            self.detections.set_side(side)
+            button.show()
+        self._fit_legend()
+
+    def set_thresholds(self, thresholds):
+        self.chart.set_thresholds(thresholds)
+        self._update_legend()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -776,26 +968,27 @@ class AnalysisCard(QtWidgets.QFrame):
 
     def _fit_legend(self):
         """The threshold legend is the first thing to go when the card is narrow."""
-        chart_tab = self.current in ('delay', 'skew')
-        parts = (self.tabs, self.legend, self.window, self.window_caption, self.pause)
-        needed = sum(part.sizeHint().width() for part in parts) + 6 * 10 + 20
+        chart_tab = self.current in self.CHART_TABS
+        parts = (self.tabs, self.legend, self.limits_button, self.window, self.window_caption, self.pause)
+        needed = sum(part.sizeHint().width() for part in parts) + 7 * 10 + 20
         self.legend.setVisible(chart_tab and self.width() >= needed)
 
     def toggle_diagnostics(self):
         self.show_tab(self._last_chart_tab if self.current == 'diagnostics' else 'diagnostics')
 
     def toggle_pause(self):
-        if self.current in ('delay', 'skew'):
+        if self.current in self.PAUSABLE_TABS:
             self.pause.toggle()
 
     def _set_paused(self, paused):
         self.chart.set_paused(paused)
+        self.detections.set_paused(paused)
         self.pause.setIcon(icon('play' if paused else 'pause',
                                 COLORS['accent'] if paused else COLORS['secondary']))
-        self.pause.setToolTip(('Resume' if paused else 'Pause') + ' the chart · shortcut P')
+        self.pause.setToolTip(('Resume' if paused else 'Pause') + ' updates · shortcut P')
 
     def _update_legend(self):
-        t = THRESHOLDS
+        t = self.chart.thresholds
         if self.current == 'skew':
             watch, high = f'|skew| ≥ {t.skew_good_below_ms:g} ms', f'≥ {t.skew_warn_below_ms:g} ms'
         else:

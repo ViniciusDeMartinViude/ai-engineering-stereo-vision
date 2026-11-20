@@ -69,6 +69,20 @@ def _tag(p):
     p.restore()
 
 
+def _gauge(p):
+    p.drawArc(QtCore.QRectF(2, 4, 12, 12), 0, 180 * 16)
+    p.drawLine(_P(8, 10), _P(11.2, 6.6))
+    p.save()
+    p.setBrush(p.pen().color())
+    p.drawEllipse(_P(8, 10), 1.3, 1.3)
+    p.restore()
+
+
+def _copy(p):
+    p.drawRoundedRect(QtCore.QRectF(5.5, 5.5, 8, 9), 1.5, 1.5)
+    p.drawPolyline([_P(3, 10.5), _P(2.5, 10.5), _P(2.5, 2.5), _P(9.5, 2.5), _P(9.5, 3.2)])
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -92,6 +106,8 @@ _PAINTERS = {
     "sliders": _sliders,
     "pulse": _pulse,
     "tag": _tag,
+    "gauge": _gauge,
+    "copy": _copy,
     "logo": _logo,
 }
 
