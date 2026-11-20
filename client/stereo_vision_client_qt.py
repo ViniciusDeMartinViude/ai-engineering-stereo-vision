@@ -26,6 +26,10 @@ from yolo_detector import YoloWorker
 from lan_ntp import measure_ntp_offset
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
+from image_adjustments import (
+    ImageAdjustmentsDialog, ImageSettings, build_lut,
+    apply_to_stereo_frame, load_settings, save_settings,
+)
 from theme import COLORS, THRESHOLDS, style_sheet, quality
 from control_room_widgets import (
     StatusChip, SegmentedControl, TelemetryBar, KpiCard,
@@ -351,6 +355,10 @@ class Studio(QtWidgets.QMainWindow):
         self.last_packet_count = 0
         self.last_packet_mono = time.monotonic()
         self.packet_rate = 0.0
+        self._image_preferences = QtCore.QSettings('AIEngineering', 'StereoVisionStudio')
+        self.image_settings = load_settings(self._image_preferences)
+        self._image_lut = build_lut(self.image_settings)
+        self.image_dialog = None
         # The raw, signed R-L skew remains unchanged in stats/logs.
         # The instrument uses a 1.5-second time-based EMA and updates at 4 Hz.
         self.skew_smoother = ExponentialSmoother(time_constant_seconds=1.5)
@@ -384,6 +392,12 @@ class Studio(QtWidgets.QMainWindow):
         brand.setObjectName('appTitle')
         header.addWidget(brand)
         header.addStretch()
+        self.image_button = QtWidgets.QPushButton('☷ Image adjustments')
+        self.image_button.setToolTip(
+            'Adjust client-only exposure, brightness, contrast and white balance '
+            'for the displayed video and YOLO inputs')
+        self.image_button.clicked.connect(self._toggle_image_dialog)
+        header.addWidget(self.image_button)
         self.stream_chip = StatusChip('STREAM')
         self.clock_chip = StatusChip('CLOCK')
         self.yolo_chip = StatusChip('YOLO')
@@ -442,6 +456,32 @@ class Studio(QtWidgets.QMainWindow):
         self.health_timer.timeout.connect(self._poll_clock_sync)
         self.health_timer.timeout.connect(self._refresh_metrics)
         self.health_timer.start(100)
+
+    def _toggle_image_dialog(self):
+        """Show or hide translucent, non-blocking adjustment controls."""
+        if self.image_dialog is None:
+            self.image_dialog = ImageAdjustmentsDialog(self.image_settings, self)
+            self.image_dialog.changed.connect(self._image_settings_changed)
+        if self.image_dialog.isVisible():
+            self.image_dialog.hide()
+        else:
+            self.image_dialog.show()
+            self.image_dialog.raise_()
+            # Keep the floating panel on screen, near the main window header.
+            frame = self.frameGeometry()
+            dialog_width = self.image_dialog.sizeHint().width()
+            x = frame.x() + max(10, frame.width()-dialog_width-40)
+            y = frame.y() + 70
+            self.image_dialog.move(x, y)
+
+    def _image_settings_changed(self, settings: ImageSettings):
+        """Rebuild tiny per-channel lookup tables only on slider changes."""
+        self.image_settings = settings
+        self._image_lut = build_lut(settings)
+        save_settings(self._image_preferences, settings)
+        active = self._image_lut is not None
+        self.image_button.setText('☷ Image adjustments ●' if active
+                                  else '☷ Image adjustments')
 
     def toggle_fullscreen(self):
         self.showMaximized() if self.isFullScreen() else self.showFullScreen()
@@ -611,11 +651,14 @@ class Studio(QtWidgets.QMainWindow):
         self.frame_arrival_times.append(now)
         self.last_recv_frame = frame
         source_h = max(1, frame.shape[0]-100)
+        # The raw source is retained for timestamp/CRC decoding and Diagnostics.
+        # Client-specific LUT adjustments affect BOTH the preview and YOLO input.
+        adjusted_frame = apply_to_stereo_frame(frame, self._image_lut, source_h)
         half = frame.shape[1]//2
-        self.left_panel.set_image(frame[:source_h, :half])
-        self.right_panel.set_image(frame[:source_h, half:])
+        self.left_panel.set_image(adjusted_frame[:source_h, :half])
+        self.right_panel.set_image(adjusted_frame[:source_h, half:])
         if self.yolo:
-            self.yolo.submit(frame, frame_id)
+            self.yolo.submit(adjusted_frame, frame_id)
             detections, status, result_id, result_mono, ms, error = self.yolo.snapshot()
             self.last_yolo_status = status
             self.last_yolo_ms = ms
@@ -666,6 +709,8 @@ class Studio(QtWidgets.QMainWindow):
             self.health_timer.stop()
         if hasattr(self, 'clock_sync_timer'):
             self.clock_sync_timer.stop()
+        if self.image_dialog is not None:
+            self.image_dialog.close()
         self._sync_executor.shutdown(wait=False, cancel_futures=True)
         if self.yolo:
             self.yolo.stop()
@@ -774,7 +819,26 @@ def main():
         dummy._sync_future.set_result((12.0, 0.2, 7))
         Studio._poll_clock_sync(dummy)
         assert dummy.clock_offset == 15.0, 'NTP offset must not accumulate'
-        print('PASS: Qt control-room widgets, ROI, seven-segment, smoothing, chart and periodic clock sync')
+        # Pixel adjustments must affect video but never modify embedded CRC.
+        raw = np.zeros((120, 16, 3), dtype=np.uint8)
+        raw[:20] = 80
+        raw[20:] = 231
+        config = ImageSettings(exposure=80, brightness=25,
+                               contrast=15, temperature=20, tint=0)
+        table = build_lut(config)
+        assert table is not None and table.shape == (256, 1, 3)
+        corrected = apply_to_stereo_frame(raw, table, 20)
+        assert not np.array_equal(corrected[:20], raw[:20])
+        assert np.array_equal(corrected[20:], raw[20:])
+        assert np.array_equal(raw[:20], np.full((20, 16, 3), 80, np.uint8))
+        assert apply_to_stereo_frame(raw, build_lut(ImageSettings()), 20) is raw
+        control = ImageAdjustmentsDialog(ImageSettings())
+        assert control.settings.neutral()
+        control._sliders['exposure'].setValue(50)
+        assert control.settings.exposure == 50
+        control.reset_values()
+        assert control.settings.neutral()
+        print('PASS: Qt control-room, ROI, timing and client-only image adjustments')
         return 0
     studio = Studio(args)
     studio.showMaximized()
