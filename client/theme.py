@@ -65,6 +65,28 @@ def style_sheet():
         background-color:{c['surface']}; border:1px solid {c['border']};
         border-radius:{RADIUS}px;
     }}
+    QDialog {{
+        background-color:transparent;
+    }}
+    QFrame#imageAdjustmentsPanel {{
+        background-color:rgba(23, 36, 51, 235);
+        border:1px solid {c['accent']};
+        border-radius:{RADIUS}px;
+    }}
+    QFrame#imageAdjustmentsPanel QLabel,
+    QFrame#imageAdjustmentsPanel QCheckBox {{
+        background:transparent;
+    }}
+    QSlider::groove:horizontal {{
+        background:{c['border']}; height:5px; border-radius:2px;
+    }}
+    QSlider::handle:horizontal {{
+        background:{c['accent']}; width:15px; margin:-6px 0;
+        border-radius:7px;
+    }}
+    QSlider::sub-page:horizontal {{
+        background:{c['accent']}; border-radius:2px;
+    }}
     QFrame#cameraHeader, QFrame#diagnosticsHeader {{
         background-color:{c['raised']}; border:1px solid {c['border']};
         border-radius:{RADIUS}px;
