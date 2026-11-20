@@ -461,7 +461,8 @@ class Studio(QtWidgets.QMainWindow):
 
     def _toggle_image_dialog(self):
         """Show or hide translucent, non-blocking adjustment controls."""
-        if self.image_dialog is None:
+        first_show = self.image_dialog is None
+        if first_show:
             self.image_dialog = ImageAdjustmentsDialog(self.image_settings, self)
             self.image_dialog.changed.connect(self._image_settings_changed)
         if self.image_dialog.isVisible():
@@ -469,12 +470,13 @@ class Studio(QtWidgets.QMainWindow):
         else:
             self.image_dialog.show()
             self.image_dialog.raise_()
-            # Keep the floating panel on screen, near the main window header.
-            frame = self.frameGeometry()
-            dialog_width = self.image_dialog.sizeHint().width()
-            x = frame.x() + max(10, frame.width()-dialog_width-40)
-            y = frame.y() + 70
-            self.image_dialog.move(x, y)
+            # Position once; preserve the operator's dragged position thereafter.
+            if first_show:
+                frame = self.frameGeometry()
+                dialog_width = self.image_dialog.sizeHint().width()
+                x = frame.x() + max(10, frame.width()-dialog_width-40)
+                y = frame.y() + 70
+                self.image_dialog.move(x, y)
 
     def _image_settings_changed(self, settings: ImageSettings):
         """Rebuild tiny per-channel lookup tables only on slider changes."""
@@ -835,6 +837,8 @@ def main():
         assert np.array_equal(raw[:20], np.full((20, 16, 3), 80, np.uint8))
         assert apply_to_stereo_frame(raw, build_lut(ImageSettings()), 20) is raw
         control = ImageAdjustmentsDialog(ImageSettings())
+        assert isinstance(control.drag_header, QtWidgets.QWidget)
+        assert control.drag_header.cursor().shape() == QtCore.Qt.CursorShape.OpenHandCursor
         assert control.settings.neutral()
         control._sliders['exposure'].setValue(50)
         assert control.settings.exposure == 50
