@@ -153,3 +153,30 @@ If no NTP response arrives, the client keeps using the last successful correctio
 5. Run `python client/stereo_vision_client_qt.py --self-test` to check that two successive offset measurements replace rather than accumulate.
 
 This aligns the application's **latency correction** to the server; it does not set or discipline the Windows system clock and is not evidence of traceable UTC synchronization.
+
+## Client-side image adjustments (competition-friendly)
+
+The client header has a **☷ Image adjustments** button that toggles a translucent, non-modal floating panel. The panel stays out of the way while live video and YOLO continue updating. It contains:
+
+- **Exposure compensation** (−2.00 to +2.00 EV, applied as software pixel gain)
+- **Brightness** (−100 to +100)
+- **Contrast** (−100 to +100)
+- **White balance temperature** (cool blue ↔ warm red)
+- **White balance tint** (magenta ↔ green)
+- **Apply adjustments** checkbox, **Reset to neutral**, and **Hide controls** actions
+
+**The same adjustments apply to both camera previews and to the stereo frame submitted to the local YOLO worker.** The multicast server and the original camera settings are not modified, so every competition workstation receives the same source video. Each workstation may have its own adjustments, stored locally using Qt QSettings. The button displays a dot when a non-neutral correction is enabled.
+
+The client processes only the video area (the first `height - 100` rows), leaving the metadata/timestamp footer **byte-for-byte unchanged**. CRC and timestamp decoding always operate on the untouched original received frame. ROI coordinates still refer to the original full-resolution image. The LUT is rebuilt only when settings change; normal video processing uses OpenCV's C++ `cv2.LUT`.
+
+**Important limitation:** Exposure compensation is a software brightness gain, *not* camera shutter, gain or auto-exposure control. If the glossy green belt is saturated by reflected lighting, no post-capture adjustment can recover missing details. Physical lighting improvements may still be necessary. Changes made on one workstation do not change the image other competitors receive, but they can produce different YOLO results; for a fair competition, define which image adjustment settings competitors are allowed to use.
+
+### Test plan
+
+1. Pull the branch, activate the existing Python 3.12 Conda environment, and run `python client/stereo_vision_client_qt.py --self-test`.
+2. Launch live streaming and YOLO; open **☷ Image adjustments**.
+3. Increase Exposure and Temperature: both displayed camera images should change together, followed by corresponding YOLO results.
+4. Disable **Apply adjustments**: both images should immediately return to the original decoded color, without resetting slider values.
+5. Toggle the panel closed/open and confirm slider positions persist. Restart the application to confirm per-client persistence.
+6. Expand Diagnostics and confirm **CRC Valid** continues to increment without new invalid timestamp errors.
+7. Compare receiver FPS and end-to-end delay with all controls neutral versus active, on the same source and machine. Pixel correction may add client-side CPU load.
