@@ -16,13 +16,17 @@ import concurrent.futures
 import statistics
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from stereo_vision_client_multiclient import StreamReceiver, decode_strip, iso_utc
-from yolo_detector import YoloWorker
+from receiver import StreamReceiver
+from stamp_protocol import decode_strip, iso_utc, split_stereo, video_height
+from yolo_detector import YoloState, YoloWorker
 from lan_ntp import measure_ntp_offset
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
@@ -534,8 +538,10 @@ class Studio(QtWidgets.QMainWindow):
             self.yolo_chip.display('neutral', 'DISABLED')
         else:
             status = self.last_yolo_status
-            state = 'bad' if 'error' in status.lower() else (
-                'warning' if 'loading' in status.lower() else 'good')
+            state = {YoloState.ERROR: 'bad', YoloState.LOADING: 'warning'}.get(
+                self.yolo.state, 'good')
+            if self.yolo.state is YoloState.READY and 'error' in status.lower():
+                state = 'warning'  # transient per-frame failure; worker keeps running
             suffix = f' · {self.last_yolo_ms:.0f} ms' if self.last_yolo_ms else ''
             self.yolo_chip.display(state, status[:36] + suffix)
 
@@ -654,13 +660,13 @@ class Studio(QtWidgets.QMainWindow):
         self.last_frame_monotonic = now
         self.frame_arrival_times.append(now)
         self.last_recv_frame = frame
-        source_h = max(1, frame.shape[0]-100)
+        source_h = video_height(frame.shape[0])
         # The raw source is retained for timestamp/CRC decoding and Diagnostics.
         # Client-specific LUT adjustments affect BOTH the preview and YOLO input.
         adjusted_frame = apply_to_stereo_frame(frame, self._image_lut, source_h)
-        half = frame.shape[1]//2
-        self.left_panel.set_image(adjusted_frame[:source_h, :half])
-        self.right_panel.set_image(adjusted_frame[:source_h, half:])
+        left_view, right_view = split_stereo(adjusted_frame)
+        self.left_panel.set_image(left_view)
+        self.right_panel.set_image(right_view)
         if self.yolo:
             self.yolo.submit(adjusted_frame, frame_id)
             detections, status, result_id, result_mono, ms, error = self.yolo.snapshot()

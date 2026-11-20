@@ -15,114 +15,37 @@ The server timestamps at frame ARRIVAL at its appsink, not camera exposure.
 """
 import argparse
 import collections
-import datetime as dt
-import math
-import socket
 import statistics
-import struct
 import sys
-import threading
 import time
 import traceback
 from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
-from lan_ntp import measure_ntp_offset
 import tkinter as tk
-from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+from lan_ntp import measure_ntp_offset
+from receiver import StreamReceiver
+from stamp_protocol import (
+    FOOTER_H,
+    Stamp, decode_strip, encode_strip, extract_strip, iso_utc,
+)
 from yolo_detector import YoloWorker
 from stereo_roi import preview_layout, normalized_roi
-
-MAGIC = 0xA55A
-VERSION = 1
-CELL_W = 6
-CELL_H = 16
-BIT_COUNT = 168
-X0 = 12
-Y_BOTTOM_OFFSET = 11 + CELL_H
-PACKET_STRUCT = struct.Struct('>HBQIiH')
-
-
-def crc16_ccitt(data: bytes) -> int:
-    crc = 0xFFFF
-    for octet in data:
-        crc ^= octet << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
-
-
-@dataclass(frozen=True)
-class Stamp:
-    left_utc_ms: int
-    sequence: int
-    right_minus_left_us: int
-
-    @property
-    def right_utc_ms(self):
-        return self.left_utc_ms + self.right_minus_left_us / 1000.0
-
-
-def decode_strip(frame: np.ndarray):
-    """Returns (Stamp or None, error_string or None), using raw decoded pixels.
-
-    The server encodes bits MSB-first, black=1, white=0, at x=12,
-    y=frame_height-27, 6x16 pixels/cell. Requires unscaled original frame.
-    """
-    h, w = frame.shape[:2]
-    y0 = h - Y_BOTTOM_OFFSET
-    if w < X0 + BIT_COUNT * CELL_W or y0 < 2:
-        return None, f'frame too small: {w}x{h}'
-    # Sample central 3x8 pixels in each cell, avoiding H264 block edges.
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    region = gray[y0+4:y0+12, X0:X0+BIT_COUNT*CELL_W]
-    if region.shape != (8, BIT_COUNT * CELL_W):
-        return None, 'strip outside image'
-    cells = region.reshape(8, BIT_COUNT, CELL_W)
-    centers = cells[:, :, 2:5].mean(axis=(0, 2))
-    # A per-frame adaptive mid-point tolerates changed brightness/compression.
-    black, white = float(np.percentile(centers, 8)), float(np.percentile(centers, 92))
-    if white - black < 45:
-        return None, f'insufficient strip contrast ({white-black:.0f})'
-    bits = (centers < (black+white)/2).astype(np.uint8)
-    raw = np.packbits(bits).tobytes()
-    try:
-        magic, version, left_ms, seq, delta_us, crc = PACKET_STRUCT.unpack(raw)
-    except struct.error as exc:
-        return None, str(exc)
-    if magic != MAGIC:
-        return None, f'magic mismatch: 0x{magic:04X}'
-    if version != VERSION:
-        return None, f'protocol version {version}, expected {VERSION}'
-    expected = crc16_ccitt(raw[:-2])
-    if crc != expected:
-        return None, f'CRC mismatch: {crc:04X} != {expected:04X}'
-    return Stamp(left_ms, seq, delta_us), None
-
-
-def iso_utc(milliseconds):
-    return dt.datetime.fromtimestamp(milliseconds / 1000, tz=dt.timezone.utc).strftime('%H:%M:%S.%f')[:-3] + ' UTC'
 
 
 def self_test():
     """Check exact strip compatibility with the server without using the network."""
-    w, h = 1280, 580
+    w, h = 1280, 100 + 480
     frame = np.full((h, w, 3), 35, np.uint8)
-    left_ms = 1794834000123
-    seq = 7351
-    delta_us = 22450
-    payload = struct.pack('>HBQIi', MAGIC, VERSION, left_ms, seq, delta_us)
-    payload += struct.pack('>H', crc16_ccitt(payload))
-    bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
-    y = h - Y_BOTTOM_OFFSET
-    for i, bit in enumerate(bits):
-        frame[y:y+CELL_H, X0+i*CELL_W:X0+(i+1)*CELL_W] = (0, 0, 0) if bit else (255, 255, 255)
+    left_ns, right_ns, seq = 1794834000123_000_000, 1794834000123_000_000 + 22450_000, 7351
+    encode_strip(frame, left_ns, right_ns, seq)
     stamp, error = decode_strip(frame)
-    assert error is None and stamp == Stamp(left_ms, seq, delta_us), (stamp, error)
+    assert error is None and stamp == Stamp(left_ns // 1_000_000, seq, 22450), (stamp, error)
     # Robustness test through lossy JPEG; video uses H.264 and must also be field-tested.
     _, jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
     stamp2, error2 = decode_strip(cv2.imdecode(jpg, cv2.IMREAD_COLOR))
@@ -131,214 +54,6 @@ def self_test():
     print('PASS: lossy-compression test (JPEG quality 75).')
 
 
-
-class MulticastSocketRelay:
-    """Join multicast using the same Python socket API as multicast_video_probe.
-
-    Forward the original MPEG-TS UDP datagrams to a private loopback UDP port.
-    GStreamer then sees a normal unicast udpsrc and no longer needs to select
-    a Windows multicast adapter. No decode/re-encode or packet transformation.
-    """
-    def __init__(self, group, port, iface_ip, local_port=15000):
-        if not iface_ip:
-            raise ValueError('Multicast receiver requires --iface-ip (this PC Ethernet IPv4)')
-        self.group = group
-        self.port = port
-        self.iface_ip = iface_ip
-        self.local_port = local_port
-        self.done = threading.Event()
-        self.thread = None
-        self.sock = None
-        self.error = None
-        self.packets = 0
-        self.bytes = 0
-        self.last_received = 0.0
-
-    def start(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-            sock.bind(('', self.port))
-            membership = socket.inet_aton(self.group) + socket.inet_aton(self.iface_ip)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-            sock.settimeout(0.5)
-        except Exception:
-            sock.close()
-            raise
-        self.sock = sock
-        self.thread = threading.Thread(target=self._run, name='multicast-socket-relay', daemon=True)
-        self.thread.start()
-        print(f'Multicast socket joined {self.group}:{self.port} via {self.iface_ip}; '
-              f'forwarding MPEG-TS unchanged to 127.0.0.1:{self.local_port}', flush=True)
-
-    def _run(self):
-        output = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        try:
-            while not self.done.is_set():
-                try:
-                    packet, addr = self.sock.recvfrom(65535)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    if self.done.is_set():
-                        break
-                    raise
-                if not packet:
-                    continue
-                output.sendto(packet, ('127.0.0.1', self.local_port))
-                self.packets += 1
-                self.bytes += len(packet)
-                self.last_received = time.monotonic()
-        except Exception as exc:
-            self.error = str(exc)
-        finally:
-            output.close()
-
-    def stop(self):
-        self.done.set()
-        if self.sock:
-            self.sock.close()
-        if self.thread:
-            self.thread.join(timeout=1.5)
-
-class StreamReceiver:
-    def __init__(self, port, transport='multicast', group='239.10.10.10', multicast_iface=None,
-                 iface_ip=None, local_port=15000):
-        try:
-            import gi
-            gi.require_version('Gst', '1.0')
-            gi.require_version('GstVideo', '1.0')
-            from gi.repository import Gst, GstVideo
-        except ImportError as exc:
-            raise RuntimeError('GStreamer Python bindings missing. Activate conda gst-stereo.') from exc
-        self.Gst, self.GstVideo = Gst, GstVideo
-        Gst.init(None)
-        self.lock = threading.Lock()
-        self.latest_frame = None
-        self.latest_receive_ns = 0
-        self.received = 0
-        self.error_text = None
-        self.warning_count = 0
-        self.bad_frames = 0
-        self.last_caps = "(none)"
-        self.relay = (MulticastSocketRelay(group, port, iface_ip, local_port)
-                      if transport == 'multicast' else None)
-        # Preserve the entire compressed H.264 stream until decoding.
-        # Dropping TS/H.264 packets BEFORE decode can break reference-frame recovery.
-        if transport == 'multicast':
-            # Consume the reliable Python-socket multicast join from a local
-            # unicast relay, instead of letting GStreamer choose the NIC.
-            source = f'udpsrc address=127.0.0.1 port={local_port} buffer-size=4194304 '
-        else:
-            source = f'udpsrc address=0.0.0.0 port={port} buffer-size=4194304 '
-        pipeline_str = (
-            source +
-            'caps="video/mpegts,systemstream=(boolean)true,packetsize=(int)188" '
-            '! tsparse set-timestamps=true '
-            '! tsdemux name=demux '
-            'demux. ! h264parse ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR '
-            '! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream '
-            '! appsink name=framesink emit-signals=true sync=false max-buffers=1 drop=true'
-        )
-        self.pipeline = Gst.parse_launch(pipeline_str)
-        self.sink = self.pipeline.get_by_name('framesink')
-        self.sink.connect('new-sample', self._sample)
-
-    def _sample(self, sink):
-        Gst = self.Gst
-        sample = sink.emit('pull-sample')
-        if sample is None:
-            return Gst.FlowReturn.OK
-        buf, caps = sample.get_buffer(), sample.get_caps()
-        if buf is None or caps is None or caps.get_size() < 1:
-            self.bad_frames += 1
-            return Gst.FlowReturn.OK
-        # Read negotiated dimensions directly from the caps structure.
-        # VideoInfo.from_caps may return success while leaving width and height
-        # at zero in some Windows/PyGObject binding combinations.
-        structure = caps.get_structure(0)
-        ok_w, width = structure.get_int('width')
-        ok_h, height = structure.get_int('height')
-        self.last_caps = caps.to_string()
-        if not ok_w or not ok_h or width <= 0 or height <= 0:
-            self.bad_frames += 1
-            if self.bad_frames <= 3:
-                print(f'Ignoring frame with invalid caps: {self.last_caps}', file=sys.stderr)
-            return Gst.FlowReturn.OK
-        ok, mapped = buf.map(Gst.MapFlags.READ)
-        if not ok:
-            self.bad_frames += 1
-            return Gst.FlowReturn.OK
-        try:
-            raw = np.frombuffer(mapped.data, dtype=np.uint8)
-            min_stride = width * 3
-            meta = self.GstVideo.buffer_get_video_meta(buf)
-            # GstVideoInfo may provide a padded row stride. If it does not,
-            # fall back to buffer-size-based stride or tightly packed BGR.
-            stride = int(meta.stride[0]) if meta is not None else 0
-            if stride < min_stride:
-                info = self.GstVideo.VideoInfo()
-                if info.from_caps(caps) and int(info.stride[0]) >= min_stride:
-                    stride = int(info.stride[0])
-            if stride < min_stride:
-                stride = (raw.size // height) if raw.size % height == 0 else min_stride
-            if stride < min_stride or raw.size < height * stride:
-                raise ValueError(f'Invalid BGR payload: {raw.size} bytes for {width}x{height}, stride={stride}, caps={self.last_caps}')
-            frame = np.ascontiguousarray(raw[:height * stride].reshape(height, stride)[:, :min_stride]
-                                          .reshape(height, width, 3)).copy()
-            if frame.shape != (height, width, 3):
-                raise ValueError(f'Unexpected decoded frame shape {frame.shape}')
-            recv_ns = time.time_ns()
-        except Exception as exc:
-            self.bad_frames += 1
-            if self.bad_frames <= 3:
-                print(f'Frame conversion issue: {exc}', file=sys.stderr)
-            return Gst.FlowReturn.OK
-        finally:
-            buf.unmap(mapped)
-        with self.lock:
-            self.latest_frame = frame
-            self.latest_receive_ns = recv_ns
-            self.received += 1
-        return Gst.FlowReturn.OK
-
-    def latest(self):
-        with self.lock:
-            return self.latest_frame, self.latest_receive_ns, self.received
-
-    def check_error(self):
-        if self.relay and self.relay.error:
-            raise RuntimeError('Multicast socket relay: ' + self.relay.error)
-        Gst = self.Gst
-        bus = self.pipeline.get_bus()
-        while True:
-            msg = bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.WARNING | Gst.MessageType.EOS)
-            if not msg:
-                break
-            if msg.type == Gst.MessageType.ERROR:
-                err, debug = msg.parse_error()
-                raise RuntimeError(f'GStreamer: {err} ({debug})')
-            if msg.type == Gst.MessageType.WARNING:
-                err, debug = msg.parse_warning()
-                self.warning_count += 1
-                if self.warning_count <= 3 or self.warning_count % 50 == 0:
-                    print(f'GStreamer warning #{self.warning_count}: {err} ({debug})', file=sys.stderr)
-            if msg.type == Gst.MessageType.EOS:
-                raise RuntimeError('Video stream ended')
-        if self.error_text:
-            raise RuntimeError(self.error_text)
-
-    def start(self):
-        if self.pipeline.set_state(self.Gst.State.PLAYING) == self.Gst.StateChangeReturn.FAILURE:
-            raise RuntimeError('Could not start UDP receiver pipeline')
-        if self.relay:
-            self.relay.start()
-
-    def stop(self):
-        if self.relay:
-            self.relay.stop()
-        self.pipeline.set_state(self.Gst.State.NULL)
 
 
 def main():
@@ -531,7 +246,7 @@ def main():
                 return
             _, w = raw_frame_shape[:2]
             bounds = normalized_roi(drag_start, drag_end, w // 2,
-                                    raw_frame_shape[0] - 100)
+                                    raw_frame_shape[0] - FOOTER_H)
             if bounds:
                 side = select_side
                 rois[side] = bounds
@@ -676,7 +391,7 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
     sw, sh = screen_size
     target_w = max(500, sw - 65)
     target_h = max(400, sh - 115)
-    source_h = max(1, h - 100)
+    source_h = max(1, h - FOOTER_H)
     half = w // 2
     if display_mode == 'left':
         video = frame[:source_h, :half, :]
@@ -781,10 +496,8 @@ def make_preview(frame, stamp, port, count, valid, invalid, skipped,
     # NEAREST to preserve the crisp black-and-white bit pattern on screen.
     label('BINARY TIMESTAMP + CRC16  |  168 bits', 15, 124,
           (176, 221, 248), selected_font=chart_font)
-    x0, bit_w, bit_h = X0, BIT_COUNT * CELL_W, CELL_H
-    y0 = h - Y_BOTTOM_OFFSET
-    roi = frame[y0:y0+bit_h, x0:x0+bit_w, :]
-    if roi.shape == (bit_h, bit_w, 3):
+    roi = extract_strip(frame)
+    if roi is not None:
         bars = Image.fromarray(np.ascontiguousarray(roi[:, :, ::-1]), mode='RGB')
         bars = bars.resize((output_width-30, 34), Image.Resampling.NEAREST)
         hud.paste(bars, (15, 153))

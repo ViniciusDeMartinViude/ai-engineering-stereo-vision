@@ -10,7 +10,7 @@ The earlier single-client UDP system showed very high timestamp decode reliabili
 
 ## Supported Python version: 3.12
 
-**Use Python 3.12.x on Windows for the PySide6 + PyQtGraph client.** The tested Qt application now lives on `main`. For a clean environment, use `conda env create -f environment-qt312.yml` and `conda activate gst-stereo-qt312-qt312`. See [Qt client setup](docs/QT_CLIENT.md). The older Tkinter client is retained as a fallback.
+**Use Python 3.12.x on Windows for the PySide6 + PyQtGraph client.** The tested Qt application now lives on `main`. For a clean environment, use `conda env create -f environment-qt312.yml` and `conda activate gst-stereo-qt312`. See [Qt client setup](docs/QT_CLIENT.md). The older Tkinter client is retained as a fallback.
 
 ## Quick start (Windows + Conda)
 
@@ -147,3 +147,12 @@ python client/stereo_vision_client_multiclient.py --iface-ip 192.168.0.11 --time
 ```
 
 No changes are needed on the camera server.
+
+## Development
+
+The visual timestamp protocol (encoder, decoder, constants, footer geometry) lives in `common/stamp_protocol.py` and is shared by the server and every client. The GStreamer receiver is in `client/receiver.py`. Run the dependency-free unit tests with:
+
+```powershell
+conda activate gst-stereo-qt312
+python -m unittest discover -s tests -v
+```

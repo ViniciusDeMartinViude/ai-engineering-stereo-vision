@@ -100,7 +100,9 @@ def measure_ntp_offset(host: str, port=9123, samples=7, timeout=0.6):
     """
     if not host:
         raise ValueError("Time-server host is required")
+    # socket.gaierror is an OSError, which callers already handle.
     results = []
+    server_ip = socket.gethostbyname(host)  # resolve once, not per sample
     for _ in range(max(1, min(int(samples), 20))):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -116,7 +118,7 @@ def measure_ntp_offset(host: str, port=9123, samples=7, timeout=0.6):
             t4 = time.time()
             if (len(response) < 48 or (response[0] & 7) != 4
                     or response[1] == 0 or response[1] >= 16
-                    or response[24:32] != tag or sender[0] != socket.gethostbyname(host)):
+                    or response[24:32] != tag or sender[0] != server_ip):
                 continue
             t2, t3 = decode_ntp(response[32:40]), decode_ntp(response[40:48])
             # NTP standard: server-minus-client = ((t2-t1)+(t3-t4))/2.

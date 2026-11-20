@@ -20,9 +20,10 @@ from pathlib import Path
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 from lan_ntp import LanNtpServer
+from stamp_protocol import FOOTER_H, STRIP_WIDTH, encode_strip, extract_strip
 import datetime as dt
 import os
-import struct
+
 import sys
 import threading
 import time
@@ -36,21 +37,6 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
 Gst.init(None)
-MAGIC = 0xA55A
-VERSION = 1
-FOOTER_H = 100
-CELL_W = 6
-CELL_H = 16
-HEADER_STRUCT = struct.Struct(">HBQIi")  # sync, version, left time ms, seq, right-left us
-
-
-def crc16_ccitt(data: bytes) -> int:
-    crc = 0xFFFF
-    for octet in data:
-        crc ^= octet << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
 
 
 def timestamp_text(ns: int) -> str:
@@ -75,6 +61,7 @@ class Camera:
         self.width, self.height, self.fps = width, height, fps
         self.lock = threading.Lock()
         self.latest = None
+        self.frame_event = threading.Event()
         self.frames = 0
         self.last_frame = 0.0
         self.pipeline = None
@@ -146,6 +133,7 @@ class Camera:
             self.frames += 1
             self.latest = Snapshot(frame, stamped_ns, self.frames)
             self.last_frame = time.monotonic()
+        self.frame_event.set()
         return Gst.FlowReturn.OK
 
     def read_latest(self):
@@ -169,6 +157,7 @@ class Camera:
         with self.lock:
             self.latest = None
             self.last_frame = 0.0
+        self.frame_event.clear()
 
     def try_mode(self, mode, timeout=1.8, quiet=False):
         """Return (success, diagnostic). A real received frame is required."""
@@ -192,7 +181,7 @@ class Camera:
                         print(f'Camera {self.index}: selected {label} -> output '
                               f'{self.width}x{self.height}', flush=True)
                     return True, ''
-                time.sleep(0.04)
+                self.frame_event.wait(0.04)
             return False, f'no frames within {timeout:.1f}s'
         except Exception as exc:
             return False, str(exc)
@@ -335,9 +324,7 @@ class UdpPublisher:
             return None
 
     def send(self, frame):
-        raw = frame.tobytes()
-        gstbuffer = Gst.Buffer.new_allocate(None, len(raw), None)
-        gstbuffer.fill(0, raw)
+        gstbuffer = Gst.Buffer.new_wrapped(frame.tobytes())
         gstbuffer.pts = self.seq * self.duration
         gstbuffer.duration = self.duration
         self.seq += 1
@@ -357,33 +344,17 @@ class UdpPublisher:
         self.pipeline.set_state(Gst.State.NULL)
 
 
-def draw_binary_strip(image: np.ndarray, left_ns: int, right_ns: int, seq: int):
-    """21-byte/168-bit transport-independent visual metadata, with CRC16.
-
-    Structure: > H B Q I i H
-       magic(0xA55A), version(1), left UTC ms, combined sequence,
-       signed right-minus-left receive time in microseconds, CRC16-CCITT.
-    Black bit=1, white bit=0. 6x16 pixel cells; 2 border bars indicate stripe.
-    """
-    left_ms = left_ns // 1_000_000
-    delta_us = max(-2147483648, min(2147483647, (right_ns - left_ns) // 1000))
-    payload = HEADER_STRUCT.pack(MAGIC, VERSION, left_ms, seq % (1 << 32), delta_us)
-    payload += struct.pack(">H", crc16_ccitt(payload))
-    bits = np.unpackbits(np.frombuffer(payload, dtype=np.uint8))
-    h, w = image.shape[:2]
-    x0 = 12
-    y0 = h - CELL_H - 11
-    if x0 + len(bits) * CELL_W + 12 > w:
-        raise RuntimeError("Frame too narrow for binary strip")
-    image[y0-3:y0+CELL_H+3, x0-5:x0+len(bits)*CELL_W+5] = (45, 45, 45)
-    for i, bit in enumerate(bits):
-        x = x0 + i * CELL_W
-        image[y0:y0+CELL_H, x:x+CELL_W] = (0, 0, 0) if bit else (255, 255, 255)
-    return delta_us
+_canvas_cache = {}
+PREVIEW_PERIOD_S = 1 / 15
 
 
 def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
-    canvas = np.zeros((height + FOOTER_H, width * 2, 3), dtype=np.uint8)
+    # Reuse one canvas: the publisher copies it out and the preview reads it
+    # synchronously, so nothing holds a reference between frames.
+    shape = (height + FOOTER_H, width * 2, 3)
+    canvas = _canvas_cache.get(shape)
+    if canvas is None:
+        canvas = _canvas_cache[shape] = np.zeros(shape, dtype=np.uint8)
     canvas[:height, :width] = left.pixels
     canvas[:height, width:] = right.pixels
     cv2.rectangle(canvas, (0, height), (width * 2, height + FOOTER_H), (35, 35, 35), -1)
@@ -405,7 +376,7 @@ def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
     cv2.putText(canvas, f"PAIR {seq}   source ages L:{age_l:.0f}ms R:{age_r:.0f}ms",
                 (width + 12, height + 25), cv2.FONT_HERSHEY_SIMPLEX, .52,
                 (150, 255, 150), 1, cv2.LINE_AA)
-    delta_us = draw_binary_strip(canvas, left.captured_ns, right.captured_ns, seq)
+    delta_us = encode_strip(canvas, left.captured_ns, right.captured_ns, seq)
     return canvas, age_l, age_r, delta_us
 
 
@@ -461,11 +432,8 @@ def make_local_preview(frame, width, height, mode='fit', screen=None,
                 font, .61, (190,235,250), 2, cv2.LINE_AA)
     # Extract the original encoded strip and enlarge using NEAREST so black
     # and white cells retain crisp edges. Never resize the data sent over UDP.
-    x0 = 12
-    bits_width = 168 * CELL_W
-    y0 = frame.shape[0] - CELL_H - 11
-    roi = frame[y0:y0+CELL_H, x0:x0+bits_width, :]
-    if roi.shape == (CELL_H, bits_width, 3):
+    roi = extract_strip(frame)
+    if roi is not None:
         bar_w = max(1, display_w-28)
         barcode = cv2.resize(roi, (bar_w, 36), interpolation=cv2.INTER_NEAREST)
         preview[vh+90:vh+126, 14:14+bar_w] = barcode
@@ -506,7 +474,7 @@ def main():
     args = parser.parse_args()
     if args.left == args.right:
         parser.error("--left and --right must be different")
-    if args.width * 2 < 168 * CELL_W + 24:
+    if args.width * 2 < STRIP_WIDTH + 24:
         parser.error("Combined video too narrow for the binary stripe; use width >= 516")
     if not 1 <= args.port <= 65535 or args.bitrate < 100:
         parser.error('Invalid --port or --bitrate')
@@ -575,6 +543,7 @@ def main():
             except (OSError, AttributeError):
                 pass
         frame_number = 0
+        last_preview_draw = 0.0
         period_ns = int(1e9 / args.fps)
         target_ns = time.monotonic_ns()
         last_report = time.monotonic()
@@ -619,9 +588,12 @@ def main():
                 publisher.send(frame)
                 if not args.no_preview:
                     # Preview controls never change original encoded video / CRC footer.
-                    preview = make_local_preview(frame, args.width, args.height, preview_mode,
-                                                 left_ns=l.captured_ns, right_ns=r.captured_ns)
-                    cv2.imshow(window_title, preview)
+                    # Rendering/resizing is costly; keep it from delaying the send loop.
+                    if time.monotonic() - last_preview_draw >= PREVIEW_PERIOD_S:
+                        last_preview_draw = time.monotonic()
+                        preview = make_local_preview(frame, args.width, args.height, preview_mode,
+                                                     left_ns=l.captured_ns, right_ns=r.captured_ns)
+                        cv2.imshow(window_title, preview)
                     if not preview_initialized:
                         preview_initialized = True
                     key = cv2.waitKey(1) & 255
