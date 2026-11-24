@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
-"""Stereo Vision Server v2 multi-client UDP -- Windows / Conda GStreamer, OpenCV and NumPy.
+"""Stereo Vision Server -- Windows / Conda GStreamer, OpenCV and NumPy.
 
 Two independent DirectShow capture pipelines -> latest-frame snapshots ->
-side-by-side BGR image + human UTC clock + binary timestamp strip.
-Optional NVIDIA NVENC MPEG-TS UDP multi-client unicast publisher (no MediaMTX required).
+side-by-side BGR image + human UTC clock + binary timestamp strip ->
+one NVIDIA NVENC H.264 MPEG-TS stream over UDP multicast (default) or a
+unicast fan-out list. No MediaMTX required.
+
+Capture, compositing and sending run on their own thread (ServerEngine), so
+the operator window can never delay the stream. The window is the Qt server
+console (same design as the Stereo Vision Studio client); --preview opencv
+keeps the older OpenCV window and --no-preview runs headless.
 
 Timestamp = host time at appsink delivery; NOT hardware exposure time.
 To launch:
-  conda activate gst-stereo
-  python stereo_vision_server_multiclient.py --clients 192.168.1.248,192.168.1.249
-  python stereo_vision_server_multiclient.py --clients-file clients.txt
+  conda activate gst-stereo-qt312
+  python server/stereo_vision_server_multiclient.py
+  python server/stereo_vision_server_multiclient.py --transport unicast --clients-file clients.txt
+  python server/stereo_vision_server_multiclient.py --self-test
 
-Dependencies: pygobject, GStreamer, opencv-python, numpy.
+Dependencies: pygobject, GStreamer, opencv, numpy; PySide6 + pyqtgraph for the console.
 """
 import argparse
-import ipaddress
-from pathlib import Path
-
-import sys as _sys
-_sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
-from lan_ntp import LanNtpServer
-from stamp_protocol import FOOTER_H, STRIP_WIDTH, encode_strip, extract_strip
+import collections
 import datetime as dt
-import os
-
+import ipaddress
+import math
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-import cv2
-import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
+from lan_ntp import LanNtpServer  # noqa: E402
+from stamp_protocol import FOOTER_H, STRIP_WIDTH, encode_strip, extract_strip  # noqa: E402
 
-import gi
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+import gi  # noqa: E402
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+from gi.repository import Gst  # noqa: E402
 
 Gst.init(None)
 
@@ -56,9 +62,10 @@ class Camera:
     The outgoing stream size and fps remain unchanged. Only capture input modes
     vary, and videoscale/convert normalize the successful mode to server output.
     """
-    def __init__(self, index: int, width: int, height: int, fps: int, fmt: str):
+    def __init__(self, index: int, width: int, height: int, fps: int, fmt: str, log=print):
         self.index = index
         self.width, self.height, self.fps = width, height, fps
+        self.log = log
         self.lock = threading.Lock()
         self.latest = None
         self.frame_event = threading.Event()
@@ -67,6 +74,7 @@ class Camera:
         self.pipeline = None
         self.sink = None
         self.active_mode = None
+        self.recovering = False
         self.preferred_format = fmt
         self.modes = self._build_modes(fmt)
 
@@ -89,6 +97,8 @@ class Camera:
 
     @staticmethod
     def mode_label(mode):
+        if mode is None:
+            return 'no capture mode'
         fmt, w, h, rate = mode
         return f'{fmt.upper()} {w}x{h} at {rate if rate is not None else "auto"} FPS'
 
@@ -140,6 +150,11 @@ class Camera:
         with self.lock:
             return self.latest
 
+    def seconds_since_frame(self):
+        """Seconds since the last delivered frame, or None before the first one."""
+        with self.lock:
+            return time.monotonic() - self.last_frame if self.last_frame else None
+
     def error(self):
         if self.pipeline is None:
             return None
@@ -164,7 +179,7 @@ class Camera:
         self.stop()
         label = self.mode_label(mode)
         if not quiet:
-            print(f'Camera {self.index}: trying {label}', flush=True)
+            self.log(f'Camera {self.index}: trying {label}')
         try:
             self._make_pipeline(mode)
             result = self.pipeline.set_state(Gst.State.PLAYING)
@@ -178,8 +193,8 @@ class Camera:
                 if self.read_latest() is not None:
                     self.active_mode = mode
                     if not quiet:
-                        print(f'Camera {self.index}: selected {label} -> output '
-                              f'{self.width}x{self.height}', flush=True)
+                        self.log(f'Camera {self.index}: selected {label} -> output '
+                                 f'{self.width}x{self.height}')
                     return True, ''
                 self.frame_event.wait(0.04)
             return False, f'no frames within {timeout:.1f}s'
@@ -206,7 +221,7 @@ class Camera:
             return bool(self.last_frame) and time.monotonic() - self.last_frame > timeout
 
 
-def negotiate_stereo_pair(left, right, max_attempts=24):
+def negotiate_stereo_pair(left, right, max_attempts=24, log=print):
     """Prefer an identical native capture mode for both physical cameras.
 
     Test each camera sequentially, but require both to deliver real frames
@@ -214,27 +229,27 @@ def negotiate_stereo_pair(left, right, max_attempts=24):
     fallbacks available rather than preventing the entire server from running.
     """
     candidates = left.modes[:max_attempts]
-    print(f'Stereo negotiation: testing up to {len(candidates)} shared modes', flush=True)
+    log(f'Stereo negotiation: testing up to {len(candidates)} shared modes')
     for mode in candidates:
         label = Camera.mode_label(mode)
         left_ok, left_issue = left.try_mode(mode, timeout=1.25, quiet=True)
         if not left_ok:
             left.stop()
-            print(f'  Shared {label}: left unavailable ({left_issue})', flush=True)
+            log(f'  Shared {label}: left unavailable ({left_issue})')
             continue
         right_ok, right_issue = right.try_mode(mode, timeout=1.25, quiet=True)
         if right_ok:
-            print(f'Stereo negotiated MATCHED capture mode: {label}', flush=True)
+            log(f'Stereo negotiated MATCHED capture mode: {label}')
             return True
-        print(f'  Shared {label}: right unavailable ({right_issue})', flush=True)
+        log(f'  Shared {label}: right unavailable ({right_issue})')
         left.stop()
         right.stop()
-    print('WARNING: no shared capture mode found; using independent fallbacks. '
-          'This may cause stereo timestamp skew.', flush=True)
+    log('WARNING: no shared capture mode found; using independent fallbacks. '
+        'This may cause stereo timestamp skew.')
     left.start(retry_favorite=True)
     right.start(retry_favorite=True)
-    print('Capture modes: LEFT=' + Camera.mode_label(left.active_mode) +
-          ', RIGHT=' + Camera.mode_label(right.active_mode), flush=True)
+    log('Capture modes: LEFT=' + Camera.mode_label(left.active_mode) +
+        ', RIGHT=' + Camera.mode_label(right.active_mode))
     return False
 
 
@@ -345,12 +360,11 @@ class UdpPublisher:
 
 
 _canvas_cache = {}
-PREVIEW_PERIOD_S = 1 / 15
 
 
 def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
-    # Reuse one canvas: the publisher copies it out and the preview reads it
-    # synchronously, so nothing holds a reference between frames.
+    # Reuse one canvas: the publisher copies it out (tobytes) and the engine
+    # copies it for the operator preview, so nothing holds a reference between frames.
     shape = (height + FOOTER_H, width * 2, 3)
     canvas = _canvas_cache.get(shape)
     if canvas is None:
@@ -380,6 +394,292 @@ def compose(left: Snapshot, right: Snapshot, seq: int, width: int, height: int):
     return canvas, age_l, age_r, delta_us
 
 
+class ServerEngine:
+    """Capture -> compose -> NVENC/UDP publish loop on a background thread.
+
+    The pixel path, timestamp strip, pacing and camera recovery are the same as
+    the original single-loop server. Views (Qt console, OpenCV preview, headless)
+    only read ``status()`` and ``latest_frame()``; they never touch the pipelines.
+    """
+    SKEW_TAU_S = 1.5  # display smoothing for the console, as in the client
+
+    def __init__(self, args, destinations, fixed_clients=()):
+        self.args = args
+        self.fixed_clients = list(fixed_clients)
+        self.lock = threading.Lock()
+        self.events = collections.deque(maxlen=400)
+        self.event_count = 0
+        self.phase = 'starting'  # starting -> negotiating -> running -> stopped | failed
+        self.error = None
+        self.matched = None
+        self.frame_number = 0
+        self.samples = collections.deque(maxlen=2000)  # (older source age ms, skew R-L ms)
+        self.sent_times = collections.deque(maxlen=120)
+        self.last_pair = None
+        self.skew_smoothed = None
+        self._skew_time = None
+        self.camera_fps = {'left': 0.0, 'right': 0.0}
+        self.udp_bytes = 0
+        self.udp_rate_mbps = None
+        self.started_mono = time.monotonic()
+        self.running_since = None
+        self._preview = None
+        self._preview_id = 0
+        self._last_preview = 0.0
+        self.preview_period = 1.0 / max(1.0, float(getattr(args, 'preview_fps', 15)))
+        self._stop = threading.Event()
+        self.thread = None
+        self.ntp_service = None
+        self.ntp_error = None
+        self.left = Camera(args.left, args.width, args.height, args.fps, args.format, log=self.log)
+        self.right = Camera(args.right, args.width, args.height, args.fps, args.format, log=self.log)
+        self.publisher = UdpPublisher(args.width * 2, args.height + FOOTER_H, args.fps,
+                                      destinations, args.bitrate,
+                                      multicast=args.transport == 'multicast',
+                                      multicast_iface=args.multicast_iface)
+
+    # ---- logging and lifecycle -------------------------------------------------
+    def log(self, message, echo=True):
+        """Print to the terminal (unless echo=False) and keep it for the console's event log."""
+        if echo:
+            print(message, flush=True)
+        with self.lock:
+            self.events.append((time.time(), str(message)))
+            self.event_count += 1
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, name='stereo-server-engine', daemon=True)
+        self.thread.start()
+
+    def stop(self, timeout=8.0):
+        self._stop.set()
+        if self.thread is not None and self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(timeout)
+
+    def is_alive(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def _run(self):
+        try:
+            self._start_services()
+            if not self._stop.is_set():
+                self._loop()
+            with self.lock:
+                self.phase = 'stopped'
+        except Exception as exc:  # keep the console open and show why
+            with self.lock:
+                self.phase = 'failed'
+                self.error = str(exc)
+            self.log(f'ERROR: {exc}')
+        finally:
+            self._shutdown()
+
+    def _start_services(self):
+        a = self.args
+        self.log('Starting cameras...')
+        if not a.no_ntp:
+            service = LanNtpServer(a.ntp_host, a.ntp_port)
+            try:
+                service.start()
+                self.ntp_service = service
+                # LanNtpServer already printed its own line; record it for the event log only.
+                self.log(f'LAN SNTP clock service listening on UDP {a.ntp_host}:{a.ntp_port}', echo=False)
+            except OSError as exc:
+                self.ntp_error = str(exc)
+                self.log(f'WARNING: LAN SNTP service unavailable: {exc}. '
+                         'Try another --ntp-port or check Windows Firewall.')
+        with self.lock:
+            self.phase = 'negotiating'
+        matched = negotiate_stereo_pair(self.left, self.right, log=self.log)
+        with self.lock:
+            self.matched = matched
+        self.publisher.start()
+        self.log(f'UDP {a.transport.upper()} MPEG-TS NVENC destination: ' +
+                 ', '.join(f'{h}:{p}' for h, p in self.publisher.destinations))
+        self.log('168-bit binary timestamp + CRC16 unchanged from working UDP v1')
+        with self.lock:
+            self.phase = 'running'
+            self.running_since = time.monotonic()
+
+    def _shutdown(self):
+        if self.ntp_service is not None:
+            self.ntp_service.stop()
+        for part in (self.publisher, self.left, self.right):
+            try:
+                part.stop()
+            except Exception as exc:  # pragma: no cover - best effort on exit
+                print(f'Shutdown issue: {exc}', file=sys.stderr)
+
+    # ---- the send loop ---------------------------------------------------------
+    def _reload_clients(self):
+        a = self.args
+        try:
+            fresh = read_clients_file(a.clients_file, a.port)
+            fresh = list(dict.fromkeys(self.fixed_clients + fresh))
+            if fresh and fresh != self.publisher.destinations:
+                self.publisher.set_destinations(fresh)
+                self.log('Updated UDP recipients: ' + ', '.join(f'{h}:{p}' for h, p in fresh))
+            elif not fresh:
+                self.log('Ignoring empty client list; keeping prior recipients')
+        except (ValueError, OSError) as exc:
+            self.log(f'Ignoring invalid clients-file update: {exc}')
+
+    def _check_camera(self, camera, retry_after):
+        now = time.monotonic()
+        err = camera.error()
+        if camera.stalled():
+            err = err or f'Camera {camera.index}: no frames for 5 seconds'
+        if camera.pipeline is None and now >= retry_after[camera.index]:
+            err = err or f'Camera {camera.index}: disconnected; retrying'
+        if err and now >= retry_after[camera.index]:
+            self.log(f'{err}\nAttempting automatic camera recovery...')
+            camera.recovering = True
+            try:
+                camera.start(retry_favorite=True)
+                self.log(f'Camera {camera.index}: recovery succeeded')
+            except RuntimeError as exc:
+                self.log(f'Camera {camera.index}: {exc}')
+                retry_after[camera.index] = time.monotonic() + 8.0
+            finally:
+                camera.recovering = False
+
+    def _loop(self):
+        a = self.args
+        left, right, publisher = self.left, self.right, self.publisher
+        period_ns = int(1e9 / a.fps)
+        target_ns = time.monotonic_ns()
+        next_reload = time.monotonic() + 2.0
+        retry_after = {left.index: 0.0, right.index: 0.0}
+        last_rate = last_report = time.monotonic()
+        rate_counts = (left.frames, right.frames)
+        report_counts = (left.frames, right.frames)
+        previous_bytes = 0
+        report_bytes = 0
+        while not self._stop.is_set():
+            if a.transport == 'unicast' and a.clients_file and time.monotonic() >= next_reload:
+                next_reload = time.monotonic() + 2.0
+                self._reload_clients()
+            for camera in (left, right):
+                self._check_camera(camera, retry_after)
+            publisher_error = publisher.error()
+            if publisher_error:
+                raise RuntimeError(publisher_error)
+            l, r = left.read_latest(), right.read_latest()
+            if l is not None and r is not None:
+                seq = self.frame_number + 1
+                frame, age_l, age_r, delta = compose(l, r, seq, a.width, a.height)
+                publisher.send(frame)
+                now = time.monotonic()
+                skew_ms = delta / 1000.0
+                with self.lock:
+                    self.frame_number = seq
+                    self.sent_times.append(now)
+                    self.samples.append((max(age_l, age_r), skew_ms))
+                    self.last_pair = {
+                        'sequence': seq, 'left_ns': l.captured_ns, 'right_ns': r.captured_ns,
+                        'age_l': age_l, 'age_r': age_r, 'skew_ms': skew_ms,
+                        'left_count': l.count, 'right_count': r.count}
+                    if self.skew_smoothed is None:
+                        self.skew_smoothed = skew_ms
+                    else:
+                        weight = -math.expm1(-max(0.0, now - self._skew_time) / self.SKEW_TAU_S)
+                        self.skew_smoothed += weight * (skew_ms - self.skew_smoothed)
+                    self._skew_time = now
+                    if now - self._last_preview >= self.preview_period:
+                        # A private copy: the compose canvas is reused next frame.
+                        self._preview = frame.copy()
+                        self._preview_id = seq
+                        self._last_preview = now
+            now = time.monotonic()
+            if now - last_rate >= 1.0:
+                elapsed = now - last_rate
+                traffic = publisher.stats()
+                with self.lock:
+                    self.camera_fps = {'left': (left.frames - rate_counts[0]) / elapsed,
+                                       'right': (right.frames - rate_counts[1]) / elapsed}
+                    if traffic is not None:
+                        self.udp_bytes = traffic[0]
+                        self.udp_rate_mbps = max(0, traffic[0] - previous_bytes) * 8 / elapsed / 1e6
+                        previous_bytes = traffic[0]
+                rate_counts = (left.frames, right.frames)
+                last_rate = now
+            if now - last_report >= 5 and self.last_pair is not None:
+                elapsed = max(.001, now - last_report)
+                pair = self.last_pair
+                traffic_note = ''
+                if publisher.stats() is not None:
+                    rate = max(0, self.udp_bytes - report_bytes) * 8 / elapsed / 1e6
+                    report_bytes = self.udp_bytes
+                    traffic_note = f" | UDP sink sent={self.udp_bytes}B rate={rate:.2f}Mbps"
+                print(f"Pair {pair['sequence']} | source ages: L={pair['age_l']:.0f}ms R={pair['age_r']:.0f}ms | "
+                      f"camera measured FPS: L={(left.frames - report_counts[0]) / elapsed:.1f} "
+                      f"R={(right.frames - report_counts[1]) / elapsed:.1f} | "
+                      f"callbacks: L={pair['left_count']} R={pair['right_count']} | "
+                      f"skew={pair['skew_ms']:.1f}ms{traffic_note}", flush=True)
+                report_counts = (left.frames, right.frames)
+                last_report = now
+            target_ns += period_ns
+            sleep_ns = target_ns - time.monotonic_ns()
+            if sleep_ns > 0:
+                self._stop.wait(sleep_ns / 1e9)
+            elif sleep_ns < -period_ns * 2:
+                target_ns = time.monotonic_ns()  # no catch-up burst
+
+    # ---- read-only views for the console ---------------------------------------
+    def latest_frame(self):
+        """(sequence, full-resolution outgoing frame copy) or (0, None)."""
+        with self.lock:
+            return self._preview_id, self._preview
+
+    def _camera_status(self, camera, side):
+        since = camera.seconds_since_frame()
+        return {'index': camera.index, 'mode': camera.active_mode,
+                'mode_label': Camera.mode_label(camera.active_mode) if camera.active_mode else None,
+                'since_frame': since, 'recovering': camera.recovering,
+                'open': camera.pipeline is not None, 'frames': camera.frames,
+                'fps': self.camera_fps.get(side, 0.0)}
+
+    def status(self):
+        a = self.args
+        now = time.monotonic()
+        cameras = {'left': self._camera_status(self.left, 'left'),
+                   'right': self._camera_status(self.right, 'right')}
+        with self.lock:
+            sent = list(self.sent_times)
+            output_fps = 0.0
+            if len(sent) > 1 and now - sent[-1] < 1.0:
+                output_fps = (len(sent) - 1) / max(1e-6, sent[-1] - sent[0])
+            samples = list(self.samples)
+            return {
+                'phase': self.phase, 'error': self.error, 'matched': self.matched,
+                'frame_number': self.frame_number, 'last_pair': dict(self.last_pair) if self.last_pair else None,
+                'since_send': (now - sent[-1]) if sent else None,
+                'output_fps': output_fps, 'target_fps': a.fps,
+                'ages': [s[0] for s in samples], 'skews': [s[1] for s in samples],
+                'skew_smoothed': self.skew_smoothed,
+                'cameras': cameras,
+                'udp_bytes': self.udp_bytes, 'udp_rate_mbps': self.udp_rate_mbps,
+                'running_for': (now - self.running_since) if self.running_since else None,
+                'transport': a.transport, 'destinations': list(self.publisher.destinations),
+                'bitrate_kbps': a.bitrate, 'width': a.width, 'height': a.height,
+                'ntp': {'enabled': not a.no_ntp, 'port': a.ntp_port,
+                        'running': self.ntp_service is not None,
+                        'requests': self.ntp_service.requests if self.ntp_service else 0,
+                        'error': self.ntp_error or (self.ntp_service.last_error if self.ntp_service else None)},
+                'event_count': self.event_count, 'events': list(self.events),
+            }
+
+    def save_snapshot(self, directory='.'):
+        """Write the latest full-resolution outgoing frame as PNG; returns the path or None."""
+        seq, frame = self.latest_frame()
+        if frame is None:
+            return None
+        path = Path(directory) / f"stereo_snapshot_{seq:07d}.png"
+        if not cv2.imwrite(str(path), frame):
+            return None
+        self.log(f'Saved {path}')
+        return str(path)
+
 
 def desktop_dimensions():
     """Return desktop dimensions without Qt/Tk."""
@@ -397,7 +697,7 @@ def desktop_dimensions():
 
 def make_local_preview(frame, width, height, mode='fit', screen=None,
                        left_ns=None, right_ns=None):
-    """Readable local HUD with enlarged display-only copy of binary telemetry."""
+    """Legacy OpenCV HUD (--preview opencv) with an enlarged copy of the binary strip."""
     sw, sh = screen if screen else desktop_dimensions()
     area_w = max(450, sw - 50)
     area_h = max(320, sh - 120)
@@ -415,23 +715,20 @@ def make_local_preview(frame, width, height, mode='fit', screen=None,
     vh = max(1, round(video.shape[0] * factor))
     if (vw, vh) != (video.shape[1], video.shape[0]):
         video = cv2.resize(video, (vw, vh), interpolation=cv2.INTER_AREA)
-    # Make the footer at least as wide as the large timestamp text.
     display_w = max(vw, min(area_w, 1050))
     preview = np.full((vh + footer_h, display_w, 3), (24, 24, 24), dtype=np.uint8)
     preview[:vh, (display_w-vw)//2:(display_w-vw)//2+vw] = video
     font = cv2.FONT_HERSHEY_SIMPLEX
     if left_ns is not None and right_ns is not None:
         cv2.putText(preview, 'LEFT  ' + timestamp_text(left_ns),
-                    (14, vh+28), font, .68, (250,250,250), 2, cv2.LINE_AA)
+                    (14, vh+28), font, .68, (250, 250, 250), 2, cv2.LINE_AA)
         cv2.putText(preview, 'RIGHT ' + timestamp_text(right_ns),
-                    (14, vh+57), font, .68, (250,250,250), 2, cv2.LINE_AA)
+                    (14, vh+57), font, .68, (250, 250, 250), 2, cv2.LINE_AA)
     else:
         cv2.putText(preview, 'LIVE STEREO TIMESTAMP', (14, vh+32), font,
-                    .78, (250,250,250), 2, cv2.LINE_AA)
+                    .78, (250, 250, 250), 2, cv2.LINE_AA)
     cv2.putText(preview, 'BINARY TIMESTAMP + CRC16 (168 bits)', (14, vh+82),
-                font, .61, (190,235,250), 2, cv2.LINE_AA)
-    # Extract the original encoded strip and enlarge using NEAREST so black
-    # and white cells retain crisp edges. Never resize the data sent over UDP.
+                font, .61, (190, 235, 250), 2, cv2.LINE_AA)
     roi = extract_strip(frame)
     if roi is not None:
         bar_w = max(1, display_w-28)
@@ -439,12 +736,58 @@ def make_local_preview(frame, width, height, mode='fit', screen=None,
         preview[vh+90:vh+126, 14:14+bar_w] = barcode
     cv2.putText(preview, f'{mode.upper()}   1: BOTH  2: LEFT  3: RIGHT   '
                 'F: FULLSCREEN  S: SAVE  Q: QUIT', (14, vh+153),
-                font, .55, (215,215,215), 1, cv2.LINE_AA)
+                font, .55, (215, 215, 215), 1, cv2.LINE_AA)
     return preview
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Dual-camera visual clock server, multi-client UDP unicast")
+def run_opencv_preview(engine, args):
+    """The pre-console OpenCV window, kept as a fallback when PySide6 is missing."""
+    window_title = 'Stereo Vision UDP Multi-client Server'
+    cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+    try:
+        cv2.setWindowProperty(window_title, cv2.WND_PROP_AUTOSIZE, 0)
+        cv2.resizeWindow(window_title, *desktop_dimensions())
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, window_title)
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+    except (OSError, AttributeError):
+        pass
+    print("Preview: 1 both, 2 left, 3 right, F fullscreen, S screenshot, Q/Esc quit.")
+    mode = args.preview_mode
+    fullscreen = False
+    shown = -1
+    while engine.is_alive():
+        seq, frame = engine.latest_frame()
+        if frame is not None and seq != shown:
+            shown = seq
+            pair = engine.status()['last_pair'] or {}
+            cv2.imshow(window_title, make_local_preview(
+                frame, args.width, args.height, mode,
+                left_ns=pair.get('left_ns'), right_ns=pair.get('right_ns')))
+        key = cv2.waitKey(15) & 255
+        if key in (ord('1'), ord('2'), ord('3')):
+            mode = {ord('1'): 'fit', ord('2'): 'left', ord('3'): 'right'}[key]
+        elif key in (ord('f'), ord('F')):
+            fullscreen = not fullscreen
+            cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN,
+                                  cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
+        elif key in (ord('s'), ord('S')):
+            engine.save_snapshot()
+        elif key in (27, ord('q'), ord('Q')):
+            break
+    cv2.destroyAllWindows()
+
+
+def run_headless(engine):
+    while engine.is_alive():
+        engine.thread.join(0.5)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Stereo Vision Server: dual-camera visual clock, "
+                                                 "NVENC MPEG-TS over UDP multicast or unicast")
     parser.add_argument("--left", type=int, default=0)
     parser.add_argument("--right", type=int, default=1)
     parser.add_argument("--width", type=int, default=640)
@@ -468,16 +811,33 @@ def main():
                         help="LAN SNTP port (default 9123; 123 can conflict with Windows Time)")
     parser.add_argument("--no-ntp", action="store_true",
                         help="Disable LAN SNTP clock service")
-    parser.add_argument("--no-preview", action="store_true")
-    parser.add_argument("--preview-mode", choices=['fit','left','right'], default='fit',
-                        help='Local preview layout; changes only the server display')
+    parser.add_argument("--no-preview", action="store_true",
+                        help="Run headless: no window, console log only (Ctrl+C to stop)")
+    parser.add_argument("--preview", choices=['qt', 'opencv'], default='qt',
+                        help="Operator window: the Qt server console (default) or the legacy OpenCV preview")
+    parser.add_argument("--preview-mode", choices=['fit', 'left', 'right'], default='fit',
+                        help='Initial camera layout in the window; changes only the server display')
+    parser.add_argument("--preview-fps", type=float, default=15.0,
+                        help='Maximum operator preview refresh rate; never affects the stream')
+    parser.add_argument("--self-test", action="store_true",
+                        help="Check the Qt console with synthetic frames (no cameras, encoder or network)")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
+    if args.self_test:
+        from server_console_qt import self_test
+        raise SystemExit(self_test())
     if args.left == args.right:
         parser.error("--left and --right must be different")
     if args.width * 2 < STRIP_WIDTH + 24:
         parser.error("Combined video too narrow for the binary stripe; use width >= 516")
     if not 1 <= args.port <= 65535 or args.bitrate < 100:
         parser.error('Invalid --port or --bitrate')
+    if args.fps < 1 or args.preview_fps <= 0:
+        parser.error('--fps and --preview-fps must be positive')
     if args.transport == 'multicast':
         try:
             group = ipaddress.IPv4Address(args.multicast_group)
@@ -502,154 +862,33 @@ def main():
             parser.error(str(exc))
         if not destinations:
             parser.error('Unicast mode requires --clients, --clients-file, or --client-ip')
-    left = Camera(args.left, args.width, args.height, args.fps, args.format)
-    right = Camera(args.right, args.width, args.height, args.fps, args.format)
-    publisher = UdpPublisher(args.width * 2, args.height + FOOTER_H, args.fps,
-                             destinations, args.bitrate,
-                             multicast=args.transport == 'multicast',
-                             multicast_iface=args.multicast_iface)
-    next_reload = time.monotonic() + 2.0
-    ntp_service = None
-    print("Starting cameras...", flush=True)
+
+    view = 'none' if args.no_preview else args.preview
+    run_console = None
+    if view == 'qt':
+        try:
+            from server_console_qt import run_console
+        except ImportError as exc:
+            print(f'Qt server console unavailable ({exc}); using the OpenCV preview. '
+                  'Install PySide6 + pyqtgraph (environment-qt312.yml) for the console.', flush=True)
+            view = 'opencv'
+
+    engine = ServerEngine(args, destinations, fixed_clients)
+    engine.start()
     try:
-        if not args.no_ntp:
-            ntp_service = LanNtpServer(args.ntp_host, args.ntp_port)
-            try:
-                ntp_service.start()
-            except OSError as exc:
-                print(f"WARNING: LAN SNTP service unavailable: {exc}. "
-                      f"Try --ntp-port 9123 or check Windows Firewall.", flush=True)
-                ntp_service = None
-        negotiate_stereo_pair(left, right)
-        publisher.start()
-        print('UDP '+args.transport.upper()+' MPEG-TS NVENC destination:', ', '.join(f'{h}:{p}' for h,p in publisher.destinations), flush=True)
-        print('168-bit binary timestamp + CRC16 unchanged from working UDP v1', flush=True)
-        print("Preview: 1 both, 2 left, 3 right, F fullscreen, S screenshot, Q/Esc quit.")
-        preview_mode = args.preview_mode
-        fullscreen = False
-        preview_initialized = False
-        window_title = 'Stereo Vision UDP Multi-client Server'
-        if not args.no_preview:
-            cv2.namedWindow(window_title, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-            # Windows maximized window retains visible taskbar and border.
-            cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-            try:
-                cv2.setWindowProperty(window_title, cv2.WND_PROP_AUTOSIZE, 0)
-                cv2.resizeWindow(window_title, *desktop_dimensions())
-                import ctypes
-                hwnd = ctypes.windll.user32.FindWindowW(None, window_title)
-                if hwnd:
-                    ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-            except (OSError, AttributeError):
-                pass
-        frame_number = 0
-        last_preview_draw = 0.0
-        period_ns = int(1e9 / args.fps)
-        target_ns = time.monotonic_ns()
-        last_report = time.monotonic()
-        previous_udp_bytes = 0
-        retry_after = {left.index: 0.0, right.index: 0.0}
-        last_counts = {left.index: (left.frames, time.monotonic()),
-                       right.index: (right.frames, time.monotonic())}
-        while True:
-            if args.transport == 'unicast' and args.clients_file and time.monotonic() >= next_reload:
-                next_reload = time.monotonic() + 2.0
-                try:
-                    fresh = read_clients_file(args.clients_file, args.port)
-                    fresh = list(dict.fromkeys(fixed_clients + fresh))
-                    if fresh and fresh != publisher.destinations:
-                        publisher.set_destinations(fresh)
-                        print('Updated UDP recipients:', ', '.join(f'{h}:{p}' for h,p in fresh), flush=True)
-                    elif not fresh:
-                        print('Ignoring empty client list; keeping prior recipients', flush=True)
-                except (ValueError, OSError) as exc:
-                    print('Ignoring invalid clients-file update:', exc, flush=True)
-            for camera in (left, right):
-                err = camera.error()
-                if camera.stalled():
-                    err = err or f'Camera {camera.index}: no frames for 5 seconds'
-                if camera.pipeline is None and time.monotonic() >= retry_after[camera.index]:
-                    err = err or f'Camera {camera.index}: disconnected; retrying'
-                if err and time.monotonic() >= retry_after[camera.index]:
-                    print(f'{err}\nAttempting automatic camera recovery...', flush=True)
-                    try:
-                        camera.start(retry_favorite=True)
-                        print(f'Camera {camera.index}: recovery succeeded', flush=True)
-                    except RuntimeError as exc:
-                        print(f'Camera {camera.index}: {exc}', flush=True)
-                        retry_after[camera.index] = time.monotonic() + 8.0
-            publisher_error = publisher.error()
-            if publisher_error:
-                raise RuntimeError(publisher_error)
-            l, r = left.read_latest(), right.read_latest()
-            if l is not None and r is not None:
-                frame_number += 1
-                frame, age_l, age_r, delta = compose(l, r, frame_number, args.width, args.height)
-                publisher.send(frame)
-                if not args.no_preview:
-                    # Preview controls never change original encoded video / CRC footer.
-                    # Rendering/resizing is costly; keep it from delaying the send loop.
-                    if time.monotonic() - last_preview_draw >= PREVIEW_PERIOD_S:
-                        last_preview_draw = time.monotonic()
-                        preview = make_local_preview(frame, args.width, args.height, preview_mode,
-                                                     left_ns=l.captured_ns, right_ns=r.captured_ns)
-                        cv2.imshow(window_title, preview)
-                    if not preview_initialized:
-                        preview_initialized = True
-                    key = cv2.waitKey(1) & 255
-                    if key in (ord('1'), ord('2'), ord('3')):
-                        preview_mode = {ord('1'): 'fit', ord('2'): 'left', ord('3'): 'right'}[key]
-                    if key in (ord('f'), ord('F')):
-                        fullscreen = not fullscreen
-                        cv2.setWindowProperty(window_title, cv2.WND_PROP_FULLSCREEN,
-                                              cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
-                    if key in (27, ord('q'), ord('Q')):
-                        break
-                    if key in (ord('s'), ord('S')):
-                        name = f"stereo_snapshot_{frame_number:07d}.png"
-                        cv2.imwrite(name, frame)
-                        print("Saved", name)
-                if time.monotonic() - last_report >= 5:
-                    now_report = time.monotonic()
-                    left_fps = (left.frames - last_counts[left.index][0]) / max(
-                        .001, now_report - last_counts[left.index][1])
-                    right_fps = (right.frames - last_counts[right.index][0]) / max(
-                        .001, now_report - last_counts[right.index][1])
-                    traffic = publisher.stats()
-                    if traffic is not None:
-                        udp_bytes, queued_bytes = traffic
-                        rate = max(0, udp_bytes - previous_udp_bytes) * 8 / max(.001, now_report - last_report) / 1e6
-                        previous_udp_bytes = udp_bytes
-                        traffic_note = f" | UDP sink sent={udp_bytes}B rate={rate:.2f}Mbps"
-                    else:
-                        traffic_note = ''
-                    print(f"Pair {frame_number} | source ages: L={age_l:.0f}ms R={age_r:.0f}ms | "
-                          f"camera measured FPS: L={left_fps:.1f} R={right_fps:.1f} | "
-                          f"callbacks: L={l.count} R={r.count} | skew={delta/1000:.1f}ms"
-                          f"{traffic_note}", flush=True)
-                    last_counts = {left.index: (left.frames, now_report),
-                                   right.index: (right.frames, now_report)}
-                    last_report = now_report
-            elif not args.no_preview:
-                key = cv2.waitKey(1) & 255
-                if key in (27, ord('q'), ord('Q')):
-                    break
-            target_ns += period_ns
-            sleep_ns = target_ns - time.monotonic_ns()
-            if sleep_ns > 0:
-                time.sleep(sleep_ns / 1e9)
-            elif sleep_ns < -period_ns * 2:
-                target_ns = time.monotonic_ns()  # no catch-up burst
+        if view == 'qt':
+            run_console(engine, args)
+        elif view == 'opencv':
+            run_opencv_preview(engine, args)
+        else:
+            run_headless(engine)
     except KeyboardInterrupt:
         print("Interrupted")
     finally:
-        if ntp_service is not None:
-            ntp_service.stop()
-        publisher.stop()
-        left.stop()
-        right.stop()
-        cv2.destroyAllWindows()
+        engine.stop()
         print("Stopped")
+    if engine.phase == 'failed':
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

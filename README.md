@@ -20,8 +20,11 @@ The earlier single-client UDP system showed very high timestamp decode reliabili
 
    ```powershell
    conda activate gst-stereo-qt312
+   python server/stereo_vision_server_multiclient.py --self-test
    python server/stereo_vision_server_multiclient.py
    ```
+
+   The server opens the **Stereo Vision Server console**, in the same design as the client, with camera, stream, clock and pairing status, skew / output-rate / source-age readouts and the outgoing timestamp strip. See [Server console](docs/SERVER_CONSOLE.md). Use `--no-preview` to run headless or `--preview opencv` for the old window.
 
 4. On each student PC:
 

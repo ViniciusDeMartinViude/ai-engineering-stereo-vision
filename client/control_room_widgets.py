@@ -472,6 +472,94 @@ class DiagnosticsPanel(QtWidgets.QWidget):
         self.barcode.set_strip(image)
 
 
+class StateOverlay(QtWidgets.QFrame):
+    """Centred card over the video for the waiting / stalled / no-signal states."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName('overlayCard')
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        row = QtWidgets.QHBoxLayout(self)
+        row.setContentsMargins(18, 14, 24, 14)
+        row.setSpacing(14)
+        self.mark = QtWidgets.QLabel('○')
+        self.mark.setObjectName('overlayMark')
+        self.mark.setFont(ui_font(26, QtGui.QFont.Weight.DemiBold))
+        text = QtWidgets.QVBoxLayout()
+        text.setSpacing(2)
+        self.title = QtWidgets.QLabel()
+        self.title.setObjectName('overlayTitle')
+        self.title.setFont(ui_font(16, QtGui.QFont.Weight.DemiBold))
+        self.subtitle = QtWidgets.QLabel()
+        self.subtitle.setObjectName('overlaySubtitle')
+        self.subtitle.setFont(ui_font(12))
+        text.addWidget(self.title)
+        text.addWidget(self.subtitle)
+        row.addWidget(self.mark)
+        row.addLayout(text)
+
+    def show_state(self, state, mark, title, subtitle):
+        if self.mark.text() != mark:
+            self.mark.setText(mark)
+        if self.title.text() != title:
+            self.title.setText(title)
+        if self.subtitle.text() != subtitle:
+            self.subtitle.setText(subtitle)
+        set_state(self.mark, state)
+        if not self.isVisibleTo(self.parentWidget()):
+            self.show()
+
+
+class DelayAxis(pg.AxisItem):
+    """Graph axis: data stays in ms, labels switch between ms and s.
+
+    Disable SI prefixes here: pyqtgraph may otherwise label kiloms as 'kms'.
+    ``quantity`` is the axis title ('Delay', 'Skew', 'Source age', ...).
+    """
+    def __init__(self, orientation='left'):
+        super().__init__(orientation=orientation)
+        self.unit = 'ms'
+        self.quantity = 'Delay'
+        self.enableAutoSIPrefix(False)
+        self.setLabel('Delay (ms)', color=COLORS['secondary'], size='10pt')
+
+    def set_quantity(self, quantity):
+        self.quantity = quantity
+        self.setLabel(f'{quantity} ({self.unit})', color=COLORS['secondary'], size='10pt')
+
+    def update_for_range(self, low_ms, high_ms):
+        unit = 's' if max(abs(low_ms), abs(high_ms)) >= 1000.0 else 'ms'
+        if unit != self.unit:
+            self.unit = unit
+            self.setLabel(f'{self.quantity} ({unit})', color=COLORS['secondary'], size='10pt')
+            self.picture = None
+            self.update()
+
+    def tickSpacing(self, minVal, maxVal, size):
+        # One tick level, so every label uses the same format (no alternating
+        # '20' / '25.0'): the finest standard level whose labels stay at least
+        # ~40 px apart at the axis' current height.
+        levels = super().tickSpacing(minVal, maxVal, size)
+        span = abs(maxVal - minVal)
+        chosen = levels[:1]
+        for spacing, offset in levels:  # coarse to fine
+            if span and size * spacing / span >= 40:
+                chosen = [(spacing, offset)]
+        return chosen
+
+    def tickStrings(self, values, scale, spacing):
+        divisor = 1000.0 if self.unit == 's' else 1.0
+        step = abs(spacing / divisor)
+        if step >= 10:
+            decimals = 0
+        elif step >= 1:
+            decimals = 0 if all(float(v / divisor).is_integer() for v in values) else 1
+        elif step >= 0.1:
+            decimals = 2
+        else:
+            decimals = 3
+        return [f'{value / divisor:.{decimals}f}' for value in values]
+
+
 class FramesAgoAxis(pg.AxisItem):
     """Bottom axis: samples sit at x = -n, labelled as 'n frames ago' (whole frames)."""
     def tickSpacing(self, minVal, maxVal, size):
@@ -500,12 +588,14 @@ class LatencyChart(QtWidgets.QWidget):
                  'mean': 'mean {value:+.1f} ms', 'value': '{:+.2f} ms'},
     }
 
+    INITIAL_DELAY_TOP = 500.0  # starting y-range of the delay chart, in ms
+
     def __init__(self, axis_cls, parent=None, thresholds=THRESHOLDS):
         super().__init__(parent)
         self.samples_limit = 100
         self.paused = False
         self.mode = 'delay'
-        self.high_envelope = 500.0
+        self.high_envelope = self.INITIAL_DELAY_TOP
         self.thresholds = thresholds
         self._sources = ((), ())
         self._last_mouse = None
@@ -589,7 +679,7 @@ class LatencyChart(QtWidgets.QWidget):
 
     def set_window(self, samples: int):
         self.samples_limit = int(samples)
-        self.high_envelope = 500.0 if self.mode == 'delay' else 30.0
+        self.high_envelope = self.INITIAL_DELAY_TOP if self.mode == 'delay' else 30.0
         self._display_count = 0
         self._render(force=True)
 
@@ -608,19 +698,19 @@ class LatencyChart(QtWidgets.QWidget):
         self.line.setBrush(_fade_brush(spec['color']))
         self.marker.setBrush(pg.mkBrush(spec['color']))
         self.mean_line.label.setFormat(spec['mean'])
-        self.high_envelope = 500.0 if mode == 'delay' else 30.0
+        self.high_envelope = self.INITIAL_DELAY_TOP if mode == 'delay' else 30.0
         self._display_count = 0
         self.axis.enableAutoSIPrefix(False)
         t = self.thresholds
+        self.axis.unit = 'ms'
+        if hasattr(self.axis, 'quantity'):
+            self.axis.quantity = spec['axis']
+        self.axis.setLabel(f"{spec['axis']} (ms)", color=COLORS['secondary'], size='10pt')
         if mode == 'delay':
-            self.axis.unit = 'ms'
-            self.axis.setLabel('Delay (ms)', color=COLORS['secondary'], size='10pt')
             self.axis.update_for_range(0, self.high_envelope)
             spans = {'warn_hi': (t.delay_good_below_ms, t.delay_warn_below_ms),
                      'bad_hi': (t.delay_warn_below_ms, 1e6)}
         else:
-            self.axis.unit = 'ms'
-            self.axis.setLabel('Skew (ms)', color=COLORS['secondary'], size='10pt')
             spans = {'warn_hi': (t.skew_good_below_ms, t.skew_warn_below_ms),
                      'bad_hi': (t.skew_warn_below_ms, 1e6),
                      'warn_lo': (-t.skew_warn_below_ms, -t.skew_good_below_ms),
@@ -664,7 +754,7 @@ class LatencyChart(QtWidgets.QWidget):
         vmax = float(np.max(self._ydata[:count]))
         if self.mode == 'delay':
             floor = 0.0
-            desired_top = max(vmax * 1.2, self.thresholds.delay_good_below_ms * 1.15)
+            desired_top = max(vmax * 1.2, self._delay_min_top())
         else:
             floor = min(-self.thresholds.skew_good_below_ms * 1.5, vmin * 1.3)
             desired_top = max(20.0, vmax * 1.3)
@@ -677,6 +767,10 @@ class LatencyChart(QtWidgets.QWidget):
         self._axis_changed()
         if self._last_mouse is not None:
             self._mouse_moved(self._last_mouse)
+
+    def _delay_min_top(self):
+        """Lowest top of the delay y-axis: the OK band stays in view."""
+        return self.thresholds.delay_good_below_ms * 1.15
 
     def _hide_hover(self):
         self.crosshair.hide()
@@ -868,6 +962,10 @@ class AnalysisCard(QtWidgets.QFrame):
              'Timestamp barcode, CRC counters, clock and link details · shortcut D'))
     CHART_TABS = ('delay', 'skew')
     PAUSABLE_TABS = ('delay', 'skew', 'detections')
+    # Subclasses (the server console) swap in their own chart and diagnostics page.
+    CHART_CLS = LatencyChart
+    DIAGNOSTICS_CLS = DiagnosticsPanel
+    FIRST_TAB = 'delay'
 
     def __init__(self, axis_cls, parent=None, thresholds=THRESHOLDS):
         super().__init__(parent)
@@ -912,19 +1010,20 @@ class AnalysisCard(QtWidgets.QFrame):
         row.addWidget(self.pause)
         layout.addWidget(header)
         self.stack = QtWidgets.QStackedWidget()
-        self.chart = LatencyChart(axis_cls, thresholds=thresholds)
+        self.chart = self.CHART_CLS(axis_cls, thresholds=thresholds)
         self.detections = DetectionsPanel()
-        self.diagnostics = DiagnosticsPanel()
+        self.diagnostics = self.DIAGNOSTICS_CLS()
         for page in (self.chart, self.detections, self.diagnostics):
             self.stack.addWidget(page)
         layout.addWidget(self.stack, 1)
         self.current = None
-        self._last_chart_tab = 'delay'
-        self.tabs.buttons['detections'].hide()  # single-camera view only
+        self._last_chart_tab = self.FIRST_TAB
+        if 'detections' in self.tabs.buttons:
+            self.tabs.buttons['detections'].hide()  # single-camera view only
         self.tabs.selected.connect(self.show_tab)
         self.window.selected.connect(lambda value: self.chart.set_window(int(value)))
         self.pause.toggled.connect(self._set_paused)
-        self.show_tab('delay', emit=False)
+        self.show_tab(self.FIRST_TAB, emit=False)
 
     def show_tab(self, key: str, emit=True):
         if key == self.current:
@@ -950,7 +1049,9 @@ class AnalysisCard(QtWidgets.QFrame):
 
     def set_detections_side(self, side):
         """'left' / 'right' shows the Detections tab for that camera; None hides it."""
-        button = self.tabs.buttons['detections']
+        button = self.tabs.buttons.get('detections')
+        if button is None:
+            return
         if side is None:
             if self.current == 'detections':
                 self.show_tab(self._last_chart_tab)
