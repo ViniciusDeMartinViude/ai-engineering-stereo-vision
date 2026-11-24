@@ -97,6 +97,7 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - App-bar status pills for **Stream, Clock, YOLO and Data integrity**; click any pill for Diagnostics
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
 - Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
+- **Magnifier** while you drag an ROI or a levelling line: a 200-pixel window in a corner of the camera tile enlarges the image around the pointer about 4× (up to 12× native pixels), without smoothing. The box or line you're drawing and a crosshair are drawn on top. It follows new frames, and it moves to another corner when the pointer or the drag's start point comes near it. Once **Level** is armed, it also shows while you hover, so you can place the start of the line.
 - **Level** per camera, for cameras that aren't square to the conveyor: click the spirit-level button, then drag a line along the conveyor, and the image turns so the belt runs straight (see [Levelling the cameras](#levelling-the-cameras))
 - Latest-frame asynchronous YOLO predictions with per-class colours on both cameras; **Labels** options show class name, class ID, confidence, box centre (x, y), box size and a centre marker (presets Minimal / Standard / Detailed)
 - KPI readouts (average delay, P95, smoothed skew) coloured by OK / Watch / High limits that each workstation can set in the **Status limits** window; greyed as *Stale* when frames stop
@@ -113,7 +114,7 @@ With `--model-library http://SERVER_IP:8765`, the **Model** button lists the cam
 When a camera isn't mounted square to the conveyor, the belt runs across its image at an angle. Each camera can be turned in the client to straighten it:
 
 1. Click the **Level** button (spirit-level icon) in that camera's header. The hint at the bottom of the image changes to *Drag along the conveyor*.
-2. Drag a line along an edge of the belt, as long as you can. A label shows its tilt while you draw.
+2. Drag a line along an edge of the belt, as long as you can. The magnifier helps you put both ends exactly on the edge, and a label shows the tilt while you draw.
 3. Release. The image turns so that line is horizontal, and the header shows the angle, e.g. **Level 4.99°**.
 
 - A line closer to vertical is made vertical instead, so a belt running up the image is never turned sideways.

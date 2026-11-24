@@ -34,6 +34,7 @@ from yolo_detector import Detection, YoloState, YoloWorker
 from lan_ntp import measure_ntp_offset
 from model_library import DownloadJob, LibraryClient, LibraryError, format_size
 from model_picker import ModelPopover
+from loupe import Loupe, loupe_zoom
 from camera_level import (format_angle, level_stereo_frame, line_correction, load_angles,
                           normalize_angle, save_angle)
 from seven_segment import SevenSegmentDisplay, format_three_digits
@@ -77,10 +78,15 @@ class DrawViewBox(pg.ViewBox):
     """Mouse-first camera: left drag ROI, right drag pan, wheel zoom, double click reset.
 
     In line mode (Level button) the next left drag draws a line instead of an ROI.
+    While a left drag is in progress, and while hovering in line mode, it reports
+    the pointer so the panel can show a magnifier.
     """
     selected = QtCore.Signal(tuple)
     line_drawn = QtCore.Signal(tuple)
     reset_requested = QtCore.Signal()
+    # (x, y, anchor or None, mode, scene position) in image-item coordinates.
+    loupe_moved = QtCore.Signal(object)
+    loupe_hidden = QtCore.Signal()
 
     def __init__(self):
         super().__init__(enableMenu=False, lockAspect=True, invertY=True)
@@ -114,6 +120,17 @@ class DrawViewBox(pg.ViewBox):
         self.line_preview.hide()
         self.preview_label.hide()
         self.start = None
+        self.loupe_hidden.emit()
+
+    def hoverEvent(self, event):
+        """In line mode, magnify under the pointer before the drag begins, to place its start."""
+        if self.mode != 'line' or self.start is not None:
+            return
+        if event.isExit():
+            self.loupe_hidden.emit()
+            return
+        point = self.mapSceneToView(event.scenePos())
+        self.loupe_moved.emit((point.x(), point.y(), None, 'line', event.scenePos()))
 
     def set_mode(self, mode):
         """'roi' (default) or 'line' (the next left drag draws a levelling line)."""
@@ -143,6 +160,7 @@ class DrawViewBox(pg.ViewBox):
         current = self.mapSceneToView(event.scenePos())
         x0, y0 = self.start
         x1, y1 = current.x(), current.y()
+        self.loupe_moved.emit((x1, y1, (x0, y0), self.mode, event.scenePos()))
         if self.mode == 'line':
             self.line_preview.setLine(x0, y0, x1, y1)
             self.line_preview.show()
@@ -204,6 +222,8 @@ class CameraPanel(QtWidgets.QFrame):
         self.roi_box = None
         self.bounds = None
         self.angle = 0.0
+        self._rgb = None
+        self._loupe_view = None
         self._updating = False
         self._has_image = False
         self._stale = False
@@ -344,6 +364,8 @@ class CameraPanel(QtWidgets.QFrame):
         self.hint.hide()
         grid.addWidget(hint_holder, 0, 0)
         layout.addWidget(video, stretch=1)
+        # Floats over the video, outside the layout; placed in the corner away from the pointer.
+        self.loupe = Loupe(video)
 
         self._hint_timer = QtCore.QTimer(self)
         self._hint_timer.setSingleShot(True)
@@ -352,6 +374,8 @@ class CameraPanel(QtWidgets.QFrame):
         self.graphics.installEventFilter(self)
         self.vbox.selected.connect(self._new_selection)
         self.vbox.line_drawn.connect(self._line_drawn)
+        self.vbox.loupe_moved.connect(self._show_loupe)
+        self.vbox.loupe_hidden.connect(self._hide_loupe)
         self.vbox.reset_requested.connect(self.clear_roi)
         self.vbox.sigRangeChanged.connect(self._range_changed)
         self.overlay.show_state('info', '◌', 'Waiting for video', self._waiting_text)
@@ -424,6 +448,9 @@ class CameraPanel(QtWidgets.QFrame):
         self.native_shape = (w, h)
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         self.image_item.setImage(rgb, autoLevels=False)
+        self._rgb = rgb
+        if self._loupe_view is not None:
+            self._show_loupe(self._loupe_view)  # keep the magnifier live while the belt moves
         if not self._has_image or reshaped:
             self._has_image = True
             self.hud_label.setToolTip(f'{w} × {h} native resolution\n{self.HUD_HELP}')
@@ -459,6 +486,36 @@ class CameraPanel(QtWidgets.QFrame):
         bottom = max(0, min(h, int(max(y0, y1))))
         if right-left >= 16 and bottom-top >= 16:
             self._set_roi((left, top, right, bottom), emit=True)
+
+    # ---- Magnifier while dragging --------------------------------------------
+    def _show_loupe(self, view):
+        """Magnify around the pointer; view = (x, y, anchor or None, mode, scene position)."""
+        if self._rgb is None:
+            return
+        self._loupe_view = view
+        x, y, anchor, mode, scene_pos = view
+        pixel_w, _ = self.vbox.viewPixelSize()  # image pixels per screen pixel
+        zoom = loupe_zoom(1.0 / pixel_w if pixel_w > 0 else 1.0)
+        w, h = self.native_shape
+        px = int(max(0, min(w - 1, x)))
+        py = int(max(0, min(h - 1, y)))
+        caption = f'x {px}  y {py}'
+        if anchor is not None and mode == 'roi':
+            caption = f'{int(abs(x - anchor[0]))} × {int(abs(y - anchor[1]))} px'
+        elif anchor is not None:
+            correction = line_correction(anchor[0], anchor[1], x, y)
+            if correction is not None:
+                caption = f'Tilt {format_angle(abs(correction))}'
+        pointer = self.graphics.mapFromScene(scene_pos)
+        avoid = [(pointer.x(), pointer.y())]
+        if anchor is not None:
+            start = self.graphics.mapFromScene(self.vbox.mapViewToScene(QtCore.QPointF(*anchor)))
+            avoid.append((start.x(), start.y()))
+        self.loupe.show_view(self._rgb, (x, y), anchor, mode, zoom, caption, avoid)
+
+    def _hide_loupe(self):
+        self._loupe_view = None
+        self.loupe.hide()
 
     # ---- Levelling: turn the image so the conveyor runs straight ------------
     def levelling(self):
@@ -1799,7 +1856,21 @@ def self_test():
     panel.set_angle(-3.25, emit=False)
     assert panel.level_info.text() == 'Level −3.25°' and angles[-1] == ('LEFT', 0.0)
     panel.set_angle(0.0, emit=False)
+    # Magnifier: shown while a drag is reported, live on new frames, hidden when the drag ends.
+    scene = panel.vbox.mapViewToScene(QtCore.QPointF(100, 80))
+    panel.vbox.loupe_moved.emit((100.0, 80.0, (30.0, 40.0), 'roi', scene))
+    assert panel.loupe.isVisibleTo(panel) and panel.loupe._caption == '70 × 40 px'
+    panel.set_image(np.full((480, 640, 3), 90, dtype=np.uint8))
+    assert panel.loupe.isVisibleTo(panel) and int(panel.loupe._pixels[100, 100, 0]) == 90
+    panel.vbox.cancel_preview()
+    assert not panel.loupe.isVisibleTo(panel) and panel._loupe_view is None
+    panel.vbox.loupe_moved.emit((300.0, 200.0, (100.0, 200.0), 'line', scene))
+    assert panel.loupe._caption == 'Tilt 0°'
+    panel.vbox.loupe_hidden.emit()
+    assert not panel.loupe.isVisibleTo(panel)
     blank = CameraPanel('RIGHT', '#70e4a6')
+    blank.vbox.loupe_moved.emit((10.0, 10.0, None, 'line', QtCore.QPointF(0, 0)))
+    assert not blank.loupe.isVisibleTo(blank), 'no image, no magnifier'
     blank.start_levelling(True)
     assert not blank.levelling() and not blank.level_button.isChecked(), 'no image, nothing to level'
     panel.set_stale(THRESHOLDS.stream_disconnected_after_s + 1)
