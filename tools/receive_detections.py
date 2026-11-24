@@ -15,8 +15,10 @@ per second. Speeds use the camera *capture* times in the message, not when the
 message arrived: arrival times include ~0.3 s of variable network and decoding
 delay and would give noisy speeds.
 
-The tracking here is deliberately simple (nearest object with the same label
-in the previous frame). Improve it: filter speeds over several frames, use the
+Each object carries the client's track ID and velocity (Ultralytics ByteTrack
+plus capture times; mm/s when the camera has a scale). For messages without
+them, this script falls back to a deliberately simple estimate of its own
+(nearest object with the same label in the previous frame). Improve it: filter speeds over several frames, use the
 conveyor direction, convert pixels to millimetres after calibration, predict
 where an object will be when the robot gets there.
 
@@ -72,8 +74,18 @@ def describe_camera(name, camera, tracker, capture_ms):
     for obj, speed in tracked:
         x, y = obj['center']
         text = f'{obj["label"]} {obj["conf"]:.0%} @({x:.0f},{y:.0f})'
-        if speed is not None:
-            text += f' v=({speed[0]:+.0f},{speed[1]:+.0f}) px/s'
+        if obj.get('track_id') is not None:
+            text = f'#{obj["track_id"]} ' + text
+        # The client tracks objects itself (Ultralytics ByteTrack) and sends their
+        # velocity; this script's own simple estimate is the fallback.
+        if obj.get('velocity_mm_s'):
+            vx, vy = obj['velocity_mm_s']
+            text += f' v=({vx:+.0f},{vy:+.0f}) mm/s'
+        elif obj.get('velocity_px_s'):
+            vx, vy = obj['velocity_px_s']
+            text += f' v=({vx:+.0f},{vy:+.0f}) px/s'
+        elif speed is not None:
+            text += f' v=({speed[0]:+.0f},{speed[1]:+.0f}) px/s (estimated here)'
         parts.append(text)
     return f'{name}: ' + '; '.join(parts)
 

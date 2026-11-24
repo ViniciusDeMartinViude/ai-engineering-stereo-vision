@@ -1,4 +1,6 @@
 """Drag magnifier: which pixels it enlarges, how much, and where it sits."""
+import os
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')  # before NumPy: see client/yolo_detector.py
 import sys
 import unittest
 from pathlib import Path

@@ -1,4 +1,6 @@
 """Camera levelling: angle from a drawn line, and rotating one camera of a stereo frame."""
+import os
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')  # before NumPy: see client/yolo_detector.py
 import math
 import sys
 import unittest

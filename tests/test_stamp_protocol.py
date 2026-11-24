@@ -1,4 +1,6 @@
 """Round-trip tests for the shared visual timestamp protocol (stdlib unittest)."""
+import os
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')  # before NumPy: see client/yolo_detector.py
 import sys
 import unittest
 from pathlib import Path

@@ -64,30 +64,45 @@ def _r(value, digits=1):
     return round(float(value), digits)
 
 
-def camera_block(size, level_deg, roi, detections):
-    """One camera's part of the message. Coordinates are levelled-image pixels."""
+def camera_block(size, level_deg, roi, detections, velocities=None, mm_per_px=None):
+    """One camera's part of the message. Coordinates are levelled-image pixels.
+
+    ``velocities``: {track_id: (vx, vy)} in px/s from the speed estimator;
+    ``mm_per_px``: the camera's scale from the Scale tool, or None.
+    """
+    velocities = velocities or {}
     ordered = sorted(detections, key=lambda d: d.confidence, reverse=True)
     objects = []
     for d in ordered[:MAX_OBJECTS_PER_CAMERA]:
         x1, y1, x2, y2 = d.xyxy
         cx, cy = d.center
+        track_id = getattr(d, 'track_id', -1)
+        velocity = velocities.get(track_id) if track_id >= 0 else None
         objects.append({'class_id': int(d.class_id), 'label': d.label, 'conf': _r(d.confidence, 3),
-                        'box': [_r(x1), _r(y1), _r(x2), _r(y2)], 'center': [_r(cx), _r(cy)]})
+                        'box': [_r(x1), _r(y1), _r(x2), _r(y2)], 'center': [_r(cx), _r(cy)],
+                        'track_id': track_id if track_id >= 0 else None,
+                        'velocity_px_s': [_r(velocity[0]), _r(velocity[1])] if velocity else None,
+                        'velocity_mm_s': ([_r(velocity[0] * mm_per_px), _r(velocity[1] * mm_per_px)]
+                                          if velocity and mm_per_px else None)})
     block = {'size': [int(size[0]), int(size[1])], 'level_deg': float(level_deg or 0.0),
-             'roi': list(roi) if roi is not None else None, 'objects': objects}
+             'roi': list(roi) if roi is not None else None,
+             'mm_per_px': float(mm_per_px) if mm_per_px else None, 'objects': objects}
     if len(ordered) > MAX_OBJECTS_PER_CAMERA:
         block['truncated'] = len(ordered)
     return block
 
 
 def detection_message(source, frame_meta, detections, inference_ms, model, clock_offset_ms,
-                      clock_synced, now_ns=None):
+                      clock_synced, now_ns=None, velocities=None, scales=None):
     """The 'detections' message for one processed stereo frame.
 
     ``frame_meta`` is what the client recorded when it handed the frame to YOLO:
     stamp (or None when the timestamp strip failed to decode), recv_ns, sizes,
-    level angles and ROIs, keyed 'LEFT' / 'RIGHT'.
+    level angles and ROIs, keyed 'LEFT' / 'RIGHT'. ``velocities`` and ``scales``
+    are keyed the same way (see ``camera_block``).
     """
+    velocities = velocities or {}
+    scales = scales or {}
     now_ns = time.time_ns() if now_ns is None else now_ns
     stamp = frame_meta.get('stamp')
     sides = {'LEFT': [], 'RIGHT': []}
@@ -108,7 +123,8 @@ def detection_message(source, frame_meta, detections, inference_ms, model, clock
         'model': model,
         'cameras': {
             side.lower(): camera_block(frame_meta['sizes'][side], frame_meta['angles'].get(side, 0.0),
-                                       frame_meta['rois'].get(side), sides[side])
+                                       frame_meta['rois'].get(side), sides[side],
+                                       velocities.get(side), scales.get(side))
             for side in ('LEFT', 'RIGHT')
         },
     }
