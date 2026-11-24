@@ -41,6 +41,7 @@ from lan_ntp import measure_ntp_offset
 from model_library import DownloadJob, LibraryClient, LibraryError, format_size
 from model_picker import ModelPopover
 from loupe import Loupe, loupe_zoom
+from roi_settings import fit_roi, load_roi, save_roi
 from detection_output import (DEFAULT_TARGET, DetectionPublisher, detection_message, parse_target,
                               status_message)
 from output_panel import OutputChip, OutputPopover, output_pill
@@ -223,7 +224,8 @@ class CameraPanel(QtWidgets.QFrame):
     HINT = ('<b>Drag</b> set ROI &nbsp;·&nbsp; <b>Right-drag</b> pan &nbsp;·&nbsp; '
             '<b>Wheel</b> zoom &nbsp;·&nbsp; <b>Double-click</b> clear ROI')
     ROI_HELP = ('YOLO region of interest, in native camera pixels.\n'
-                'Drag on the image to set it; double-click to clear it.')
+                'Drag on the image to set it; double-click to clear it.\n'
+                'It is remembered on this PC for the next start.')
     HUD_HELP = 'Received/decoded stereo FPS (not sensor FPS) · latest frame delay'
     LEVEL_HINT = ('<b>Drag along the conveyor</b> to level this camera &nbsp;·&nbsp; '
                   '<b>Esc</b> or the Level button cancels')
@@ -242,6 +244,7 @@ class CameraPanel(QtWidgets.QFrame):
         self.roi_box = None
         self.bounds = None
         self.angle = 0.0
+        self._pending_roi = None   # (bounds, saved image size) waiting for the first image
         self.show_speed = False
         self.mm_per_px = None
         self._velocities = {}
@@ -503,6 +506,7 @@ class CameraPanel(QtWidgets.QFrame):
             if self.bounds is not None:
                 self._set_roi(self.bounds, emit=False)
             self.overlay.hide()
+            self._apply_pending_roi()
 
     def fit_view(self):
         w, h = self.native_shape
@@ -695,6 +699,26 @@ class CameraPanel(QtWidgets.QFrame):
         self._fit_header()
         if emit:
             self.level_changed.emit(self.side, self.angle)
+
+    def restore_roi(self, bounds, saved_size):
+        """ROI saved at the last run; applied (and fitted) once the image size is known."""
+        self._pending_roi = (tuple(bounds), tuple(saved_size))
+        if self._has_image:
+            self._apply_pending_roi()
+
+    def _apply_pending_roi(self):
+        if self._pending_roi is None:
+            return
+        bounds, saved_size = self._pending_roi
+        self._pending_roi = None
+        fitted, reason = fit_roi(bounds, saved_size, self.native_shape)
+        if fitted is not None:
+            self._set_roi(fitted, emit=True)
+        else:
+            self.hint.setText(reason)
+            self.hint.show()
+            QtCore.QTimer.singleShot(8000, lambda: self.hint.hide() if self.hint.text() == reason else None)
+            self.info.setToolTip(f'{reason}\n\n{self.ROI_HELP}')
 
     def clear_roi(self):
         """Reset YOLO crop to full image without changing the current zoom."""
@@ -1077,6 +1101,9 @@ class Studio(QtWidgets.QMainWindow):
         self.right_panel = CameraPanel('RIGHT', COLORS['accent'])
         for panel in (self.left_panel, self.right_panel):
             panel.roi_changed.connect(self._roi_changed)
+            saved_roi = load_roi(self._preferences, panel.side)
+            if saved_roi is not None:
+                panel.restore_roi(*saved_roi)
             panel.level_changed.connect(self._level_changed)
             panel.set_angle(self.level_angles[panel.side], emit=False)
             show_speed, scale = load_speed_settings(self._preferences, panel.side)
@@ -1310,7 +1337,9 @@ class Studio(QtWidgets.QMainWindow):
     def _roi_changed(self, side, bounds):
         if self.yolo:
             self.yolo.set_roi(side, bounds)
-        # ROI coordinates are already shown directly in the camera header.
+        # Remembered on this PC with the image size it was drawn on (see roi_settings).
+        panel = self.left_panel if side == 'LEFT' else self.right_panel
+        save_roi(self._preferences, side, bounds, panel.native_shape)
 
     def _speed_settings_changed(self, side, _value):
         panel = self.left_panel if side == 'LEFT' else self.right_panel
@@ -2146,6 +2175,21 @@ def self_test():
     panel.set_angle(-3.25, emit=False)
     assert panel.level_info.text() == 'Level −3.25°' and angles[-1] == ('LEFT', 0.0)
     panel.set_angle(0.0, emit=False)
+    # Remembered ROI: waits for the first image, then is fitted (or refused) and announced.
+    restored = []
+    fresh = CameraPanel('LEFT', '#70e4a6')
+    fresh.roi_changed.connect(lambda side, bounds: restored.append(bounds))
+    fresh.restore_roi((96, 168, 351, 359), (640, 480))
+    assert fresh.bounds is None and restored == [], 'nothing applied before an image exists'
+    fresh.set_image(np.zeros((960, 1280, 3), dtype=np.uint8))
+    assert fresh.bounds == (192, 336, 702, 718) and restored == [(192, 336, 702, 718)], \
+        'same shape, larger image: scaled, and reported so YOLO and the settings follow'
+    wide = CameraPanel('RIGHT', '#70e4a6')
+    wide.roi_changed.connect(lambda side, bounds: restored.append(bounds))
+    wide.set_image(np.zeros((1080, 1920, 3), dtype=np.uint8))
+    wide.restore_roi((96, 168, 351, 359), (640, 480))
+    assert wide.bounds is None and len(restored) == 1, 'different shape: not applied'
+    assert 'Saved ROI not applied' in wide.hint.text() and 'Saved ROI' in wide.info.toolTip()
     # Magnifier: shown while a drag is reported, live on new frames, hidden when the drag ends.
     scene = panel.vbox.mapViewToScene(QtCore.QPointF(100, 80))
     panel.vbox.loupe_moved.emit((100.0, 80.0, (30.0, 40.0), 'roi', scene))

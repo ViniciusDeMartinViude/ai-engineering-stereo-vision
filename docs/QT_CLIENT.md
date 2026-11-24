@@ -96,7 +96,7 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - Maximized **dark-themed** desktop app; the camera row is sized to the video aspect ratio, with the remaining height for the dashboard
 - App-bar status pills for **Stream, Clock, YOLO and Data integrity**; click any pill for Diagnostics
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
-- Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
+- Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO. Each camera's ROI is remembered on this PC. At the next start it's applied to the first frame. If the camera resolution changed but has the same shape, the ROI is scaled. If the shape changed (e.g. 640×480 → 1920×1080), it isn't applied, because the view is different. A hint says so, and the ROI is kept for when that resolution returns.
 - **Output** pill: publishes both cameras' detections as JSON over UDP for another program (e.g. a robot backend). It shows the send rate and ripples on each message; click it for the switch, destination and the latest message. See [Detection output](DETECTION_OUTPUT.md)
 - **Speed** per camera (gauge button in the camera header): shows each tracked object's speed on its label (`#7 · 142 mm/s`, or `still`), with an arrow to where it will be in half a second. See [Object speed](#object-speed)
 - **Magnifier** while you drag an ROI or a levelling line: a 200-pixel window in a corner of the camera tile enlarges the image around the pointer about 4× (up to 12× native pixels), without smoothing. The box or line you're drawing and a crosshair are drawn on top. It follows new frames, and it moves to another corner when the pointer or the drag's start point comes near it. Once **Level** is armed, it also shows while you hover, so you can place the start of the line.
@@ -157,7 +157,7 @@ ROIs are in **camera pixels** (of the levelled image when a camera is levelled),
 ## Known limitations
 
 - This Qt implementation and requires **live validation on the actual Windows/Conda computer**; the GitHub code was not executed on the physical setup.
-- Current ROIs are session-only; no saved calibration/ROI configuration yet.
+- No saved stereo calibration yet. ROIs, level angles and speed scales are remembered per camera on each PC.
 - Side-by-side camera capture still has independent sensor exposures; no hardware camera synchronization.
 - Depth/disparity and stereo calibration are not yet implemented.
 - Qt plugin conflicts can occur if a Conda/Python environment also contains OpenCV packages with bundled Qt plugins. Diagnose Qt platform plugin errors separately before modifying the working GStreamer stack.
