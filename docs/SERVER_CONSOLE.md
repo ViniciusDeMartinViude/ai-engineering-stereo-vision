@@ -45,7 +45,9 @@ All other options (`--width`, `--fps`, `--format`, `--bitrate`, `--transport`, `
 
 Status limits are the provisional defaults in `client/theme.py` and are read-only on the server. Per-workstation limits remain a client feature.
 
-Keyboard: `1` both cameras · `2` left · `3` right · `F` full screen · `Esc` maximized · `D` Stream tab · `P` pause the chart · `S` snapshot. Closing the window (or Ctrl+C in the terminal) stops the stream and releases the cameras.
+The **Library** pill and the **Models** tab (`M`) show the YOLO model library that the server shares with the clients: models, classes, sizes, download counts and the addresses to use. See [Model library](MODEL_LIBRARY.md).
+
+Keyboard: `1` both cameras · `2` left · `3` right · `F` full screen · `Esc` maximized · `D` Stream tab · `M` Models tab · `P` pause the chart · `S` snapshot. Closing the window (or Ctrl+C in the terminal) stops the stream and releases the cameras.
 
 ## Architecture change
 

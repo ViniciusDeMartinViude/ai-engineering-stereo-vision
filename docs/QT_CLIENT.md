@@ -103,7 +103,9 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - Delay/skew history with threshold bands, mean line and hover readout; Diagnostics with the field-annotated 168-bit CRC16 barcode
 - Original incoming frames unchanged; client-only image adjustments affect display and YOLO input only
 
-Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets.
+Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets, `M` choose the YOLO model.
+
+With `--model-library http://SERVER_IP:8765`, the **Model** button lists the camera server's trained models and switches detection to the one you pick, downloading it first if needed. See [Model library](MODEL_LIBRARY.md).
 
 ## Technical details
 

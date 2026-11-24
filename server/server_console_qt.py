@@ -26,6 +26,7 @@ from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
 
 from stamp_protocol import FOOTER_H, decode_strip, extract_strip, iso_utc  # noqa: E402
+from model_library import format_size  # noqa: E402
 from seven_segment import format_three_digits  # noqa: E402
 from icons import icon, pixmap  # noqa: E402
 from theme import (COLORS, THRESHOLDS, apply_theme, display_font, numeric_font,  # noqa: E402
@@ -432,20 +433,146 @@ class ServerDiagnostics(QtWidgets.QWidget):
         self._event_count = event_count
 
 
+class ModelsPanel(QtWidgets.QWidget):
+    """The YOLO model library this server shares with the clients."""
+    COLUMNS = ('Model', 'Classes', 'Size', 'Added', 'Downloads')
+    ADD_HINT = 'python tools/model_library.py add best.pt --name NAME'
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.folder = None
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(6)
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(10)
+        self.caption = QtWidgets.QLabel('Model library')
+        self.caption.setObjectName('secondary')
+        self.caption.setFont(ui_font(12, QtGui.QFont.Weight.DemiBold))
+        self.addresses = QtWidgets.QLabel('')
+        self.addresses.setObjectName('caption')
+        self.addresses.setFont(numeric_font(12))
+        self.addresses.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.open_button = QtWidgets.QPushButton('Open folder')
+        self.open_button.setObjectName('flat')
+        self.open_button.setToolTip('Open the library folder. Copy .pt / .onnx files in, or run\n'
+                                    + self.ADD_HINT)
+        self.open_button.clicked.connect(self._open_folder)
+        top.addWidget(self.caption)
+        top.addStretch()
+        top.addWidget(self.addresses)
+        top.addWidget(self.open_button)
+        layout.addLayout(top)
+        self.table = QtWidgets.QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.horizontalHeader().setFont(display_font(11))
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setFont(ui_font(13))
+        self.placeholder = QtWidgets.QLabel()
+        self.placeholder.setObjectName('caption')
+        self.placeholder.setFont(ui_font(13))
+        self.placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setWordWrap(True)
+        self.views = QtWidgets.QStackedWidget()
+        self.views.addWidget(self.table)
+        self.views.addWidget(self.placeholder)
+        layout.addWidget(self.views, 1)
+        self._shown = None
+
+    def _open_folder(self):
+        if self.folder:
+            Path(self.folder).mkdir(parents=True, exist_ok=True)
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.folder))
+
+    def update_status(self, status):
+        if status is None:
+            self.open_button.hide()
+            self.addresses.setText('')
+            self._show_placeholder('The model library is off (--no-library).')
+            return
+        self.folder = status['folder']
+        cap = f"cap {status['rate_mbps']:g} Mbit/s" if status['rate_mbps'] > 0 else 'no speed cap'
+        self.addresses.setText('  ·  '.join(status['urls']) + f'  ·  {cap}')
+        self.addresses.setToolTip('Clients use one of these with --model-library. Prefer the '
+                                  'address on the network that is NOT carrying the video.')
+        models = status['models']
+        count = len(models)
+        downloads = status['downloads']
+        busy = f"  ·  sending {len(status['active'])}" if status['active'] else ''
+        self.caption.setText(f"{count} model{'s' if count != 1 else ''}  ·  "
+                             f"{downloads} download{'s' if downloads != 1 else ''}{busy}")
+        if status['error']:
+            self._show_placeholder(f"Library unavailable: {status['error']}")
+            return
+        if not models:
+            self._show_placeholder(f"No models yet. Copy trained .pt or .onnx files into "
+                                   f"{status['folder']}, or run  {self.ADD_HINT}")
+            return
+        key = tuple((m.sha256, status['per_model'].get(m.sha256, 0)) for m in models)
+        if key != self._shown:
+            self._shown = key
+            self.table.setRowCount(count)
+            for r, m in enumerate(models):
+                classes = ', '.join(m.classes) if m.classes else 'unknown'
+                cells = (m.name, classes, format_size(m.size), m.added,
+                         str(status['per_model'].get(m.sha256, 0)))
+                for c, text in enumerate(cells):
+                    item = QtWidgets.QTableWidgetItem(text)
+                    if c == 0:
+                        item.setFont(ui_font(13, QtGui.QFont.Weight.DemiBold))
+                        item.setToolTip(f'{m.file}\nSHA-256 {m.sha256}'
+                                        + (f'\n{m.description}' if m.description else ''))
+                    elif c == 1:
+                        item.setToolTip(classes)
+                    if c in (2, 4):
+                        item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignRight
+                                              | QtCore.Qt.AlignmentFlag.AlignVCenter)
+                    self.table.setItem(r, c, item)
+        self.views.setCurrentWidget(self.table)
+
+    def _show_placeholder(self, message):
+        self._shown = None
+        self.placeholder.setText(message)
+        self.views.setCurrentWidget(self.placeholder)
+
+
 class ServerAnalysisCard(AnalysisCard):
     TABS = (('skew', 'Camera skew', 'Right-minus-left capture time of each published pair · raw samples'),
             ('delay', 'Source age', 'Age of the older camera frame when the pair is encoded and sent'),
-            ('diagnostics', 'Stream', 'Outgoing timestamp strip, encoder, network and event log · shortcut D'))
+            ('diagnostics', 'Stream', 'Outgoing timestamp strip, encoder, network and event log · shortcut D'),
+            ('library', 'Models', 'Trained YOLO models this server shares with the clients · shortcut M'))
     CHART_CLS = ServerChart
     DIAGNOSTICS_CLS = ServerDiagnostics
     FIRST_TAB = 'skew'
 
     def __init__(self, parent=None):
         super().__init__(DelayAxis, parent)
+        self.library = ModelsPanel()
+        self.stack.addWidget(self.library)
         self.limits_button.hide()
         self.legend.setToolTip('Provisional status limits (client/theme.py)')
 
     def show_tab(self, key, emit=True):
+        if key == 'library':
+            if key == self.current:
+                return
+            self.current = key
+            if self.tabs.current != key:
+                self.tabs.select(key, emit=False)
+            self.stack.setCurrentWidget(self.library)
+            for widget in (self.window, self.window_caption, self.limits_button, self.pause, self.legend):
+                widget.setVisible(False)
+            if emit:
+                self.tab_changed.emit(key)
+            return
         super().show_tab(key, emit)
         self.limits_button.hide()  # the server shows the default limits read-only
 
@@ -471,11 +598,14 @@ class RateCard(KpiCard):
 
 
 class ServerConsole(QtWidgets.QMainWindow):
-    def __init__(self, engine, args):
+    def __init__(self, engine, args, library=None):
         super().__init__()
         apply_theme(QtWidgets.QApplication.instance())
         self.engine = engine
         self.args = args
+        self.library = library
+        self._library_status = None
+        self._library_polled = 0.0
         self.thresholds = THRESHOLDS
         self.view_mode = 'both'
         self._equalize_pending = False
@@ -529,12 +659,16 @@ class ServerConsole(QtWidgets.QMainWindow):
         row.addSpacing(24)
         self.cameras_chip = StatusChip('Cameras', min_width=190)
         self.stream_chip = StatusChip('Stream', min_width=180)
-        self.clock_chip = StatusChip('Clock', min_width=176)
-        self.pairing_chip = StatusChip('Pairing', min_width=176)
+        self.clock_chip = StatusChip('Clock', min_width=168)
+        self.pairing_chip = StatusChip('Pairing', min_width=168)
+        self.library_chip = StatusChip('Library', min_width=160)
         for chip in (self.cameras_chip, self.stream_chip, self.clock_chip, self.pairing_chip):
             chip.set_clickable(True)
             chip.clicked.connect(lambda: self.analysis.show_tab('diagnostics'))
             row.addWidget(chip)
+        self.library_chip.set_clickable(True)
+        self.library_chip.clicked.connect(lambda: self.analysis.show_tab('library'))
+        row.addWidget(self.library_chip)
         row.addStretch()
         self.snapshot_button = QtWidgets.QPushButton('Snapshot')
         self.snapshot_button.setIcon(icon('camera', COLORS['secondary']))
@@ -633,6 +767,7 @@ class ServerConsole(QtWidgets.QMainWindow):
                      ('Escape', self.showMaximized),
                      ('D', self.analysis.toggle_diagnostics),
                      ('P', self.analysis.toggle_pause),
+                     ('M', lambda: self.analysis.show_tab('library')),
                      ('S', self.save_snapshot)]
         for key, action in shortcuts:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
@@ -708,6 +843,8 @@ class ServerConsole(QtWidgets.QMainWindow):
     def _tab_changed(self, tab):
         if tab == 'diagnostics' and self._last_frame is not None:
             self._refresh_diagnostics(self.engine.status())
+        elif tab == 'library':
+            self._refresh_library(force=True)
 
     # ---- actions --------------------------------------------------------------
     def save_snapshot(self):
@@ -755,6 +892,39 @@ class ServerConsole(QtWidgets.QMainWindow):
         self.diagnostics.add_events(s['events'], s['event_count'])
         if self.analysis.current == 'diagnostics':
             self._refresh_diagnostics(s)
+        self._refresh_library()
+
+    def _refresh_library(self, force=False):
+        """Library state at 2 Hz (it re-reads the folder, so changes show without a restart)."""
+        now = time.monotonic()
+        if not force and now - self._library_polled < 0.5:
+            return
+        self._library_polled = now
+        status = self.library.status() if self.library is not None else None
+        self._library_status = status
+        if self.analysis.current == 'library':
+            self.analysis.library.update_status(status)
+        chip = self.library_chip
+        if status is None:
+            chip.display('neutral', 'Off', 'Started with --no-library')
+            return
+        urls = '\n'.join(status['urls'])
+        cap = f"{status['rate_mbps']:g} Mbit/s cap" if status['rate_mbps'] > 0 else 'no speed cap'
+        detail = (f"Clients: --model-library <one of>\n{urls}\n"
+                  f"Folder {status['folder']} · {cap}\n"
+                  f"{status['downloads']} downloads · {format_size(status['bytes_sent'])} sent")
+        count = len(status['models'])
+        if status['error'] or not status['running']:
+            chip.display('bad', 'Unavailable', (status['error'] or 'Not running') + '\n' + detail)
+        elif status['active']:
+            lines = '\n'.join(f'{name} → {ip}: {done * 100 // max(1, size)} %'
+                               for ip, name, done, size in status['active'])
+            chip.display('info', f"Sending {len(status['active'])}", lines + '\n' + detail)
+        elif not count:
+            chip.display('neutral', 'Empty', 'No models yet. Add one with\n'
+                         + ModelsPanel.ADD_HINT + '\n' + detail)
+        else:
+            chip.display('good', f"{count} model{'s' if count != 1 else ''}", detail)
 
     def _stalled(self, s):
         return s['since_send'] is None or s['since_send'] >= self.thresholds.stale_after_s
@@ -913,10 +1083,10 @@ class ServerConsole(QtWidgets.QMainWindow):
         super().closeEvent(event)
 
 
-def run_console(engine, args):
+def run_console(engine, args, library=None):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     app.setApplicationName('Stereo Vision Server')
-    window = ServerConsole(engine, args)
+    window = ServerConsole(engine, args, library)
     window.showMaximized()
     # Ctrl+C in the terminal closes the console (the 10 Hz timer lets Python see it).
     # If the engine stops on an error the window stays open, so the operator can read
@@ -1004,7 +1174,12 @@ def self_test():
     args = server.build_parser().parse_args(['--width', '640', '--height', '480', '--fps', '10'])
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     engine = FakeEngine(args)
-    window = ServerConsole(engine, args)
+    import tempfile
+    from model_library import LibraryStore, ModelLibraryServer
+    library_dir = tempfile.TemporaryDirectory()
+    library = ModelLibraryServer(LibraryStore(library_dir.name), '127.0.0.1', 0, 30, log=lambda m: None)
+    library.start()
+    window = ServerConsole(engine, args, library)
     window.resize(1366, 768)
     window.show()
 
@@ -1076,6 +1251,19 @@ def self_test():
     check('lost: No signal', window.left_panel.overlay.title.text() == 'No signal'
           and window.stream_chip.message == 'Not sending')
 
+    window._refresh_library(force=True)
+    check('library: empty pill', window.library_chip.message == 'Empty')
+    Path(library_dir.name, 'belt-v3.pt').write_bytes(b'x' * 2048)
+    window.analysis.show_tab('library')
+    window._refresh_library(force=True)
+    table = window.analysis.library.table
+    check('library: dropped file listed', window.library_chip.message == '1 model'
+          and table.rowCount() == 1 and table.item(0, 0).text() == 'belt-v3')
+    check('library: addresses shown', ':' in window.analysis.library.addresses.text())
+    check('library tab hides chart controls', window.analysis.window.isHidden())
+    window.analysis.show_tab('skew')
+    library.stop()
+
     window.change_view('right')
     pump()
     check('view 3 hides left', window.left_panel.isHidden() and not window.right_panel.isHidden())
@@ -1086,6 +1274,7 @@ def self_test():
     check('failure shown', window.stream_chip.state == 'bad' and
           window.left_panel.overlay.title.text() == 'Server stopped')
     window.close()
+    library_dir.cleanup()
 
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:

@@ -90,6 +90,13 @@ def _camera(p):
     p.drawEllipse(_P(8, 9), 2.6, 2.6)
 
 
+def _stack(p):
+    """Stacked layers: the model library."""
+    p.drawPolygon(QtGui.QPolygonF([_P(8, 2), _P(14.5, 5.5), _P(8, 9), _P(1.5, 5.5)]))
+    p.drawPolyline([_P(1.5, 8.5), _P(8, 12), _P(14.5, 8.5)])
+    p.drawPolyline([_P(1.5, 11.5), _P(8, 15), _P(14.5, 11.5)])
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -116,6 +123,7 @@ _PAINTERS = {
     "gauge": _gauge,
     "copy": _copy,
     "camera": _camera,
+    "stack": _stack,
     "logo": _logo,
 }
 
