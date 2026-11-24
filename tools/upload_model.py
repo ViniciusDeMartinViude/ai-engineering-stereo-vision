@@ -22,6 +22,7 @@ new version next time they open the Model list.
 import argparse
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import sys
@@ -72,6 +73,13 @@ class Library:
         if parts.scheme != 'http' or not parts.hostname:
             raise UploadError(f'--server must look like http://IP:8765, not {url!r}')
         self.host, self.port = parts.hostname, parts.port or 8765
+        via = (via or '').strip() or None
+        if via:
+            try:
+                via = str(ipaddress.IPv4Address(via))
+            except ValueError:
+                raise UploadError(f"--via {via!r} is not an IPv4 address. Give this computer's own Wi-Fi "
+                                  'IP from ipconfig (like 192.168.0.12), or leave it out') from None
         self.token, self.via, self.timeout = token, via, timeout
 
     def describe(self):

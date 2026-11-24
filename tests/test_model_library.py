@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 
 from model_library import (  # noqa: E402
-    DownloadJob, LibraryClient, LibraryError, LibraryStore, ModelLibraryServer, sha256_file,
+    DownloadJob, LibraryClient, LibraryError, LibraryStore, ModelLibraryServer, check_source_ip, sha256_file,
 )
 
 
@@ -131,6 +131,16 @@ class LibraryTest(unittest.TestCase):
         bad = LibraryClient(client.base_url, cache_dir=self.cache / 'x', source_ip='203.0.113.7')
         with self.assertRaises(LibraryError):
             bad.fetch_index()
+
+    def test_source_ip_must_be_an_address(self):
+        self.assertIsNone(check_source_ip(None))
+        self.assertIsNone(check_source_ip('  '))
+        self.assertEqual(check_source_ip(' 192.168.0.12 '), '192.168.0.12')
+        for bad in ('CLIENT_WIFI_IP', "<this computer's Wi-Fi IP>", 'laptop.local', '192.168.0', '::1'):
+            with self.assertRaises(ValueError) as caught:
+                LibraryClient('http://127.0.0.1:8765', cache_dir=self.cache, source_ip=bad)
+            self.assertIn('is not an IPv4 address', str(caught.exception))
+            self.assertIn('ipconfig', str(caught.exception))
 
     def test_download_job_reports_progress(self):
         self.store.add(make_model(self.sources, 'best.pt'), 'belt')
