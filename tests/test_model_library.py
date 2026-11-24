@@ -38,6 +38,15 @@ class LibraryTest(unittest.TestCase):
             self.server.stop()
         self.tmp.cleanup()
 
+    def counter(self, read, expected, timeout=2.0):
+        """Server counters are updated just after the last byte leaves; wait for them."""
+        deadline = time.monotonic() + timeout
+        value = read(self.server.status())
+        while value != expected and time.monotonic() < deadline:
+            time.sleep(0.01)
+            value = read(self.server.status())
+        return value
+
     def serve(self, rate_mbps=0):
         self.server = ModelLibraryServer(self.store, '127.0.0.1', 0, rate_mbps, log=self.logs.append)
         self.server.start()
@@ -79,7 +88,7 @@ class LibraryTest(unittest.TestCase):
         self.assertEqual(sha256_file(path), entry.sha256)
         self.assertEqual(path.name, 'belt.pt')
         self.assertEqual(seen[-1], (entry.size, entry.size))
-        self.assertEqual(self.server.status()['downloads'], 1)
+        self.assertEqual(self.counter(lambda s: s['downloads'], 1), 1)
         self.server.stop()
         self.server = None
         again, offline = client.resolve('BELT')
@@ -109,11 +118,16 @@ class LibraryTest(unittest.TestCase):
 
     def test_speed_cap_and_source_ip(self):
         entry = self.store.add(make_model(self.sources, 'best.pt', size=250_000), 'belt')
-        client = self.serve(rate_mbps=4.0)  # 250 kB at 0.5 MB/s takes ~0.5 s
+        client = self.serve(rate_mbps=4.0)  # 250 kB at 0.5 MB/s: ~0.39 s (the last chunk is not waited)
         client = LibraryClient(client.base_url, cache_dir=self.cache, source_ip='127.0.0.1')
         start = time.monotonic()
         client.download(entry)
-        self.assertGreater(time.monotonic() - start, 0.4)
+        self.assertGreater(time.monotonic() - start, 0.3)
+        uncapped = LibraryClient(client.base_url, cache_dir=self.cache / 'b')
+        self.server.pacer = type(self.server.pacer)(0)
+        start = time.monotonic()
+        uncapped.download(entry)
+        self.assertLess(time.monotonic() - start, 0.3, 'without the cap it is much faster')
         bad = LibraryClient(client.base_url, cache_dir=self.cache / 'x', source_ip='203.0.113.7')
         with self.assertRaises(LibraryError):
             bad.fetch_index()
@@ -146,7 +160,7 @@ class LibraryTest(unittest.TestCase):
         for t in threads:
             t.join(10)
         self.assertEqual(results, [entry.sha256] * 4)
-        self.assertEqual(self.server.status()['per_model'][entry.sha256], 4)
+        self.assertEqual(self.counter(lambda s: s['per_model'].get(entry.sha256, 0), 4), 4)
 
 
 if __name__ == '__main__':

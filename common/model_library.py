@@ -4,15 +4,18 @@ Server side
     A folder (default ``models/`` in the repository, git-ignored) with the
     model files and an ``index.json`` manifest. ``tools/model_library.py add``
     publishes a model; files dropped into the folder are indexed automatically.
-    ``ModelLibraryServer`` serves the folder READ-ONLY over HTTP:
+    ``ModelLibraryServer`` serves the folder over HTTP:
 
         GET /api/models            JSON index of the library
         GET /api/models/<sha256>   one model file, by content hash
+        GET /api/upload            can this token upload here? (token required)
+        PUT /api/models/<name>     publish a model (token required)
 
     Downloads are paced by one shared speed cap so a download can never starve
-    the video stream on a shared link. Nothing can be uploaded or deleted over
-    HTTP: models are executable code when loaded, so only the operator of the
-    camera PC publishes them.
+    the video stream on a shared link. Models are executable code when loaded,
+    so uploads are OFF unless the operator creates an upload token
+    (``tools/model_library.py token``); they can also be limited to one local
+    address (e.g. the Wi-Fi adapter). Nothing can be deleted over HTTP.
 
 Client side
     ``LibraryClient`` lists the library, downloads a model into a per-user
@@ -27,11 +30,13 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import hmac
 import http.client
 import http.server
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import threading
@@ -43,6 +48,7 @@ from pathlib import Path
 FORMAT = 1
 DEFAULT_PORT = 8765
 DEFAULT_RATE_MBPS = 30.0
+DEFAULT_UPLOAD_MAX_MB = 512
 INDEX_NAME = 'index.json'
 # Formats a client can load on any machine. TensorRT .engine files are tied to
 # one GPU model and TensorRT version, so they are not shared.
@@ -289,6 +295,26 @@ class LibraryStore:
             return entry
 
 
+def new_upload_token():
+    return secrets.token_urlsafe(24)
+
+
+def load_upload_token(path):
+    """The upload token stored in ``path``, or None when the file is missing or empty."""
+    try:
+        token = Path(path).read_text(encoding='utf-8').strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def save_upload_token(path, token):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token + '\n', encoding='utf-8')
+    return path
+
+
 class _Pacer:
     """One speed cap shared by every download (a token bucket with no burst)."""
 
@@ -331,11 +357,21 @@ class _QuietHTTPServer(http.server.ThreadingHTTPServer):
 
 
 class ModelLibraryServer:
-    """Read-only HTTP service for the library folder (runs on the camera PC)."""
+    """HTTP service for the library folder (runs on the camera PC).
+
+    Downloads are open to the LAN; uploads need ``upload_token`` and, when
+    ``upload_on`` lists local addresses, must arrive on one of them.
+    """
 
     def __init__(self, store, host='0.0.0.0', port=DEFAULT_PORT, rate_mbps=DEFAULT_RATE_MBPS,
-                 log=print):
+                 log=print, upload_token=None, upload_on=None,
+                 upload_max_bytes=DEFAULT_UPLOAD_MAX_MB * 1024 * 1024):
         self.store = store
+        self.upload_token = upload_token or None
+        self.upload_on = [ip for ip in (upload_on or []) if ip] or None
+        self.upload_max_bytes = int(upload_max_bytes)
+        self.uploads = 0
+        self.rejected_uploads = 0
         self.host, self.port = host, int(port)
         self.rate_mbps = float(rate_mbps or 0)
         self.log = log
@@ -366,6 +402,9 @@ class ModelLibraryServer:
             def do_GET(self):
                 server._handle(self)
 
+            def do_PUT(self):
+                server._handle_upload(self)
+
         try:
             self.store.refresh()
             httpd = _QuietHTTPServer((self.host, self.port), Handler)
@@ -380,6 +419,14 @@ class ModelLibraryServer:
         self.log(f'Model library: {len(self.store.entries())} model(s) in {self.store.root}, '
                  f'serving on TCP {self.host}:{self.port} ({cap}); '
                  + ', '.join(self.urls()))
+        self.log('Model library uploads: ' + self.upload_summary())
+
+    def upload_summary(self):
+        if not self.upload_token:
+            return 'off (no upload token; create one with tools/model_library.py token)'
+        where = ('only on ' + ', '.join(self.upload_on)) if self.upload_on else 'on every address'
+        return f'on, token required, accepted {where}, up to {self.upload_max_bytes // (1024 * 1024)} MB'
+
 
     def stop(self):
         if self.httpd is not None:
@@ -409,6 +456,18 @@ class ModelLibraryServer:
         path = urllib.parse.urlsplit(handler.path).path.rstrip('/')
         client = handler.client_address[0]
         try:
+            if path == '/api/upload':
+                denied = self._upload_denied(handler)
+                if denied:
+                    with self.lock:
+                        self.rejected_uploads += 1
+                    self.log(f'Model library: upload check from {client} refused ({denied[0]}): {denied[1]}')
+                    self._send_json(handler, denied[0], {'error': denied[1]})
+                else:
+                    self._send_json(handler, 200, {
+                        'enabled': True, 'max_bytes': self.upload_max_bytes,
+                        'formats': list(SUPPORTED_SUFFIXES)})
+                return
             if path in ('', '/api', '/api/models'):
                 entries = self.store.entries()
                 self._send_json(handler, 200, {
@@ -429,6 +488,133 @@ class ModelLibraryServer:
             with self.lock:
                 self.failed += 1
             self.log(f'Model library: transfer to {client} interrupted ({exc})')
+
+    def _upload_denied(self, handler):
+        """(HTTP status, reason) when this request may not upload, else None."""
+        if not self.upload_token:
+            return 403, ('Uploads are off on this server. On the camera PC run '
+                         '"python tools/model_library.py token" and restart the server.')
+        local = handler.connection.getsockname()[0]
+        if self.upload_on and local not in self.upload_on:
+            return 403, (f'Uploads are only accepted on {", ".join(self.upload_on)}; this request '
+                         f'reached the server on {local}. Use that address (and --via).')
+        supplied = handler.headers.get('Authorization', '')
+        supplied = supplied[7:].strip() if supplied.startswith('Bearer ') else ''
+        if not hmac.compare_digest(supplied.encode('utf-8'), self.upload_token.encode('utf-8')):
+            return 401, 'Wrong or missing upload token.'
+        return None
+
+    DISCARD_LIMIT = 16 * 1024 * 1024
+
+    def _discard_body(self, handler):
+        """Read and drop a refused upload's body so the sender gets the answer.
+
+        Closing a socket with unread data makes Windows reset the connection,
+        and the sender would see 'connection aborted' instead of the reason.
+        Bodies over 16 MB are not read; the uploaders check before sending.
+        """
+        try:
+            remaining = int(handler.headers.get('Content-Length', '0'))
+        except ValueError:
+            return
+        if not 0 < remaining <= self.DISCARD_LIMIT:
+            return
+        try:
+            handler.connection.settimeout(10)
+            while remaining:
+                block = handler.rfile.read(min(CHUNK, remaining))
+                if not block:
+                    break
+                remaining -= len(block)
+        except OSError:
+            pass
+
+    def _handle_upload(self, handler):
+        with self.lock:
+            self.requests += 1
+        client = handler.client_address[0]
+        unquote = urllib.parse.unquote
+
+        def refuse(status, message, body_unread=True):
+            with self.lock:
+                self.rejected_uploads += 1
+            self.log(f'Model library: upload from {client} refused ({status}): {message}')
+            if body_unread:
+                self._discard_body(handler)
+            self._send_json(handler, status, {'error': message})
+
+        try:
+            match = re.fullmatch(r'/api/models/([^/]+)', urllib.parse.urlsplit(handler.path).path)
+            if not match:
+                self._send_json(handler, 404, {'error': 'upload to /api/models/<name>'})
+                return
+            denied = self._upload_denied(handler)
+            if denied:
+                refuse(*denied)
+                return
+            try:
+                name = clean_name(unquote(match.group(1)))
+            except ValueError as exc:
+                refuse(400, str(exc))
+                return
+            filename = unquote(handler.headers.get('X-Model-File', ''))
+            suffix = Path(filename).suffix.lower()
+            if suffix not in SUPPORTED_SUFFIXES:
+                refuse(415, f'{suffix or "this file type"} is not accepted; use '
+                       + ', '.join(SUPPORTED_SUFFIXES))
+                return
+            expected = handler.headers.get('X-Model-SHA256', '').lower()
+            if not _SHA_RE.match(expected):
+                refuse(400, 'X-Model-SHA256 header missing or invalid')
+                return
+            try:
+                length = int(handler.headers.get('Content-Length', ''))
+            except ValueError:
+                refuse(411, 'Content-Length required')
+                return
+            if length <= 0 or length > self.upload_max_bytes:
+                refuse(413, f'{format_size(length)} is over the '
+                       f'{format_size(self.upload_max_bytes)} upload limit')
+                return
+            incoming = self.store.root / '.incoming'
+            incoming.mkdir(parents=True, exist_ok=True)
+            temp = incoming / f'{secrets.token_hex(8)}{suffix}'
+            digest = hashlib.sha256()
+            started = time.monotonic()
+            try:
+                remaining = length
+                with open(temp, 'wb') as out:
+                    while remaining:
+                        block = handler.rfile.read(min(CHUNK, remaining))
+                        if not block:
+                            raise ConnectionError('upload ended early')
+                        out.write(block)
+                        digest.update(block)
+                        remaining -= len(block)
+                if digest.hexdigest() != expected:
+                    refuse(422, 'The file arrived corrupted (SHA-256 mismatch); nothing was changed.',
+                           body_unread=False)
+                    return
+                classes = unquote(handler.headers.get('X-Model-Classes', ''))
+                classes = [c.strip() for c in classes.split(',') if c.strip()] or None
+                imgsz = handler.headers.get('X-Model-Imgsz', '')
+                replaced = self.store.find(name) is not None
+                entry = self.store.add(temp, name, unquote(handler.headers.get('X-Model-Description', '')),
+                                       classes=classes, imgsz=int(imgsz) if imgsz.isdigit() else None)
+            finally:
+                temp.unlink(missing_ok=True)
+            with self.lock:
+                self.uploads += 1
+            seconds = time.monotonic() - started
+            self.log(f'Model library: received {entry.name} ({format_size(entry.size)}) from {client} '
+                     f'in {seconds:.1f} s' + (' (replaced the previous version)' if replaced else ''))
+            self._send_json(handler, 201, {'model': entry.to_json(), 'replaced': replaced})
+        except LibraryError as exc:
+            refuse(400, str(exc))
+        except (ConnectionError, OSError) as exc:
+            with self.lock:
+                self.failed += 1
+            self.log(f'Model library: upload from {client} interrupted ({exc})')
 
     def _send_file(self, handler, entry, path, client):
         size = path.stat().st_size
@@ -481,6 +667,9 @@ class ModelLibraryServer:
                 'requests': self.requests, 'downloads': self.downloads, 'failed': self.failed,
                 'active': [tuple(v) for v in self.active.values()],
                 'bytes_sent': self.bytes_sent, 'last_client': self.last_client,
+                'uploads_enabled': bool(self.upload_token), 'upload_on': list(self.upload_on or []),
+                'uploads': self.uploads, 'rejected_uploads': self.rejected_uploads,
+                'upload_summary': self.upload_summary(),
             }
 
 

@@ -37,7 +37,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 from lan_ntp import LanNtpServer  # noqa: E402
 from model_library import (  # noqa: E402
-    DEFAULT_PORT as LIBRARY_PORT, DEFAULT_RATE_MBPS, LibraryStore, ModelLibraryServer,
+    DEFAULT_PORT as LIBRARY_PORT, DEFAULT_RATE_MBPS, DEFAULT_UPLOAD_MAX_MB, LibraryStore,
+    ModelLibraryServer, load_upload_token,
 )
 from stamp_protocol import FOOTER_H, STRIP_WIDTH, encode_strip, extract_strip  # noqa: E402
 
@@ -827,6 +828,15 @@ def build_parser():
                         help="Total download speed cap in Mbit/s so model downloads never starve the "
                              f"video stream (default {DEFAULT_RATE_MBPS:g}; 0 = no cap)")
     parser.add_argument("--no-library", action="store_true", help="Do not serve the model library")
+    parser.add_argument("--upload-token-file",
+                        default=str(Path(__file__).resolve().parents[1] / 'config' / 'library-upload.token'),
+                        help="Uploads from other computers are accepted only with this token; no file = "
+                             "uploads off. Create it with: python tools/model_library.py token")
+    parser.add_argument("--upload-on", default='',
+                        help="Accept uploads only on these local addresses, e.g. the Wi-Fi IP "
+                             "192.168.0.102 (comma-separated; default: any)")
+    parser.add_argument("--upload-max-mb", type=int, default=DEFAULT_UPLOAD_MAX_MB,
+                        help=f"Largest model file accepted (default {DEFAULT_UPLOAD_MAX_MB} MB)")
     parser.add_argument("--no-preview", action="store_true",
                         help="Run headless: no window, console log only (Ctrl+C to stop)")
     parser.add_argument("--preview", choices=['qt', 'opencv'], default='qt',
@@ -892,8 +902,12 @@ def main():
     engine = ServerEngine(args, destinations, fixed_clients)
     library = None
     if not args.no_library:
-        library = ModelLibraryServer(LibraryStore(args.model_library), args.library_host,
-                                     args.library_port, args.library_rate_mbps, log=engine.log)
+        library = ModelLibraryServer(
+            LibraryStore(args.model_library), args.library_host, args.library_port,
+            args.library_rate_mbps, log=engine.log,
+            upload_token=load_upload_token(args.upload_token_file),
+            upload_on=[ip.strip() for ip in args.upload_on.split(',') if ip.strip()],
+            upload_max_bytes=args.upload_max_mb * 1024 * 1024)
         try:
             library.start()
         except OSError as exc:

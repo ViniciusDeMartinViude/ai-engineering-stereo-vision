@@ -507,8 +507,12 @@ class ModelsPanel(QtWidgets.QWidget):
         count = len(models)
         downloads = status['downloads']
         busy = f"  ·  sending {len(status['active'])}" if status['active'] else ''
+        uploads = ('uploads on' + (f" ({', '.join(status['upload_on'])})" if status['upload_on'] else '')
+                   if status['uploads_enabled'] else 'uploads off')
         self.caption.setText(f"{count} model{'s' if count != 1 else ''}  ·  "
-                             f"{downloads} download{'s' if downloads != 1 else ''}{busy}")
+                             f"{downloads} download{'s' if downloads != 1 else ''}{busy}  ·  {uploads}")
+        self.caption.setToolTip('Uploads: ' + status['upload_summary'] +
+                                f"\n{status['uploads']} received, {status['rejected_uploads']} refused")
         if status['error']:
             self._show_placeholder(f"Library unavailable: {status['error']}")
             return
@@ -912,7 +916,8 @@ class ServerConsole(QtWidgets.QMainWindow):
         cap = f"{status['rate_mbps']:g} Mbit/s cap" if status['rate_mbps'] > 0 else 'no speed cap'
         detail = (f"Clients: --model-library <one of>\n{urls}\n"
                   f"Folder {status['folder']} · {cap}\n"
-                  f"{status['downloads']} downloads · {format_size(status['bytes_sent'])} sent")
+                  f"{status['downloads']} downloads · {format_size(status['bytes_sent'])} sent\n"
+                  f"Uploads: {status['upload_summary']}")
         count = len(status['models'])
         if status['error'] or not status['running']:
             chip.display('bad', 'Unavailable', (status['error'] or 'Not running') + '\n' + detail)

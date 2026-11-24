@@ -100,14 +100,16 @@ Both preview windows now open **maximized** on Windows (showing the taskbar). Pr
 
 ## Model library: share trained YOLO models from the camera server
 
-Publish a trained model once on the camera PC and every client can pick it from the **Model** button (shortcut `M`). The client downloads it in the background, checks it and switches detection without restarting. The camera server serves the git-ignored `models/` folder read-only over HTTP (TCP 8765) with a download speed cap, so the video stream keeps its bandwidth.
+Publish a trained model once on the camera PC and every client can pick it from the **Model** button (shortcut `M`). The client downloads it in the background, checks it and switches detection without restarting. The camera server serves the git-ignored `models/` folder over HTTP (TCP 8765) with a download speed cap, so the video stream keeps its bandwidth.
 
 ```powershell
 python tools/model_library.py add best.pt --name belt-v3
 python client/stereo_vision_client_qt.py --iface-ip CLIENT_IP --time-server SERVER_IP --model-library http://SERVER_WIFI_IP:8765 --library-via CLIENT_WIFI_IP
 ```
 
-See [Model library](docs/MODEL_LIBRARY.md) for the two-network setup (download over Wi‑Fi until the VLAN switch arrives), the firewall and offline use.
+To publish from another computer over Wi‑Fi (a training PC, for example), create an upload token on the camera PC with `python tools/model_library.py token`. Then run `tools/upload_model.py` (Python, standard library only) or `tools/upload_model.cmd` (PowerShell, no Python needed) on that computer.
+
+See [Model library](docs/MODEL_LIBRARY.md) for the two-network setup (download over Wi‑Fi until the VLAN switch arrives), uploads, the firewall and offline use.
 
 ## YOLO object detection on the student client
 

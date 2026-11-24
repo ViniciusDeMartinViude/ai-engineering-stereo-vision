@@ -32,3 +32,5 @@ Thumbs.db
 
 # YOLO model library served by the camera server (models are not committed)
 models/
+# Model library upload token (a secret)
+config/*.token
