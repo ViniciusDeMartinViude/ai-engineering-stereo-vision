@@ -142,6 +142,10 @@ The pretrained model file may be downloaded by Ultralytics if not present; a cus
 
 This adds object detection only, **not** stereo matching, depth calculation or 3D object coordinates. To estimate height/depth, the cameras still require calibrated intrinsics, extrinsics and temporal pairing.
 
+## Levelling cameras that aren't square to the conveyor
+
+In the Qt client, click a camera's **Level** button and drag a line along the conveyor. That camera's image then turns so the belt runs straight, for display, ROIs and YOLO alike. The angle is remembered per PC, and **×** undoes it. See [Levelling the cameras](docs/QT_CLIENT.md#levelling-the-cameras).
+
 ## Interactive left/right YOLO regions of interest
 
 The stereo client now offers four buttons in the maximized window toolbar:

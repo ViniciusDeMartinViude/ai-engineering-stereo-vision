@@ -97,21 +97,43 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - App-bar status pills for **Stream, Clock, YOLO and Data integrity**; click any pill for Diagnostics
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
 - Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
+- **Level** per camera, for cameras that aren't square to the conveyor: click the spirit-level button, then drag a line along the conveyor, and the image turns so the belt runs straight (see [Levelling the cameras](#levelling-the-cameras))
 - Latest-frame asynchronous YOLO predictions with per-class colours on both cameras; **Labels** options show class name, class ID, confidence, box centre (x, y), box size and a centre marker (presets Minimal / Standard / Detailed)
 - KPI readouts (average delay, P95, smoothed skew) coloured by OK / Watch / High limits that each workstation can set in the **Status limits** window; greyed as *Stale* when frames stop
 - **Detections** tab in single-camera view: class, ID, confidence, centre and size per detection, sortable, copyable (Ctrl+C) and pausable
 - Delay/skew history with threshold bands, mean line and hover readout; Diagnostics with the field-annotated 168-bit CRC16 barcode
 - Original incoming frames unchanged; client-only image adjustments affect display and YOLO input only
 
-Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets, `M` choose the YOLO model.
+Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` cancels a levelling line or returns to the maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets, `M` choose the YOLO model.
 
 With `--model-library http://SERVER_IP:8765`, the **Model** button lists the camera server's trained models and switches detection to the one you pick, downloading it first if needed. See [Model library](MODEL_LIBRARY.md).
+
+## Levelling the cameras
+
+When a camera isn't mounted square to the conveyor, the belt runs across its image at an angle. Each camera can be turned in the client to straighten it:
+
+1. Click the **Level** button (spirit-level icon) in that camera's header. The hint at the bottom of the image changes to *Drag along the conveyor*.
+2. Drag a line along an edge of the belt, as long as you can. A label shows its tilt while you draw.
+3. Release. The image turns so that line is horizontal, and the header shows the angle, e.g. **Level 4.99°**.
+
+- A line closer to vertical is made vertical instead, so a belt running up the image is never turned sideways.
+- To fine-tune, draw again on the levelled image. The new correction is added to the current angle.
+- **×** next to the angle undoes it. **Esc**, or the Level button again, cancels a line you haven't drawn yet. A drag shorter than 40 pixels is ignored.
+- Each camera has its own angle. The client remembers both on this PC and applies them at the next start.
+
+What is turned:
+- The image you see, the ROIs you draw and what YOLO looks at all use the levelled image. Box coordinates, centres and the Detections table are in levelled-image pixels.
+- The image keeps its size, so the corners the turn uncovers are black. An existing ROI stays where it is on screen; redraw it if it should follow the belt. Detections from before the change are dropped.
+- The incoming stream and the timestamp strip are not touched: delay, skew and the Diagnostics barcode are read from the original frame.
+- It costs about 4 ms per frame for one 1920×1080 camera, and 6 ms for both, on the camera PC's CPU.
+
+This is a 2D rotation for viewing and detection, not stereo calibration. It doesn't correct lens distortion or perspective, and depth measurements will need a proper calibration later.
 
 ## Technical details
 
 The client uses the shared `client/receiver.py` (`StreamReceiver`) and `common/stamp_protocol.py` (`decode_strip`, `iso_utc`). No changes to the server or transmission format are needed. Qt runs on the main thread, GStreamer delivers its most recent frames in its own callback, and the YOLO worker operates in a separate thread with a one-frame pending queue.
 
-ROIs are in **original camera pixels**, not pixels on the Windows screen. They are preview overlays, not a new network encoding. Two camera images feed YOLO independently, and each bounding box is translated back to its camera space.
+ROIs are in **camera pixels** (of the levelled image when a camera is levelled), not pixels on the Windows screen. They are preview overlays, not a new network encoding. Two camera images feed YOLO independently, and each bounding box is translated back to its camera space.
 
 ## Known limitations
 

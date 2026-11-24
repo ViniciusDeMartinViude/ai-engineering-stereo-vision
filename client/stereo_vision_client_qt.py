@@ -34,6 +34,8 @@ from yolo_detector import Detection, YoloState, YoloWorker
 from lan_ntp import measure_ntp_offset
 from model_library import DownloadJob, LibraryClient, LibraryError, format_size
 from model_picker import ModelPopover
+from camera_level import (format_angle, level_stereo_frame, line_correction, load_angles,
+                          normalize_angle, save_angle)
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
 from image_adjustments import (
@@ -72,13 +74,24 @@ def fmt_roi(roi):
 
 
 class DrawViewBox(pg.ViewBox):
-    """Mouse-first camera: left drag ROI, right drag pan, wheel zoom, double click reset."""
+    """Mouse-first camera: left drag ROI, right drag pan, wheel zoom, double click reset.
+
+    In line mode (Level button) the next left drag draws a line instead of an ROI.
+    """
     selected = QtCore.Signal(tuple)
+    line_drawn = QtCore.Signal(tuple)
     reset_requested = QtCore.Signal()
 
     def __init__(self):
         super().__init__(enableMenu=False, lockAspect=True, invertY=True)
         self.start = None
+        self.mode = 'roi'
+        self.line_preview = QtWidgets.QGraphicsLineItem()
+        self.line_preview.setPen(pg.mkPen(COLORS['accent'], width=2.5))
+        self.line_preview.setZValue(100)
+        self.line_preview.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        self.addItem(self.line_preview, ignoreBounds=True)
+        self.line_preview.hide()
         self.preview = QtWidgets.QGraphicsRectItem()
         self.preview.setPen(pg.mkPen(COLORS['roi'], width=1.5, style=QtCore.Qt.PenStyle.DashLine))
         self.preview.setBrush(pg.mkBrush(tint(COLORS['roi'], 28)))
@@ -98,8 +111,14 @@ class DrawViewBox(pg.ViewBox):
 
     def cancel_preview(self):
         self.preview.hide()
+        self.line_preview.hide()
         self.preview_label.hide()
         self.start = None
+
+    def set_mode(self, mode):
+        """'roi' (default) or 'line' (the next left drag draws a levelling line)."""
+        self.cancel_preview()
+        self.mode = mode
 
     def mouseDragEvent(self, event, axis=None):
         if event.button() == QtCore.Qt.MouseButton.RightButton:
@@ -124,6 +143,19 @@ class DrawViewBox(pg.ViewBox):
         current = self.mapSceneToView(event.scenePos())
         x0, y0 = self.start
         x1, y1 = current.x(), current.y()
+        if self.mode == 'line':
+            self.line_preview.setLine(x0, y0, x1, y1)
+            self.line_preview.show()
+            correction = line_correction(x0, y0, x1, y1)
+            self.preview_label.setText(' Keep drawing along the belt ' if correction is None
+                                       else f' Tilt {format_angle(abs(correction))} ')
+            self.preview_label.setPos(x1, y1)
+            self.preview_label.show()
+            if event.isFinish():
+                self.cancel_preview()
+                self.mode = 'roi'
+                self.line_drawn.emit((x0, y0, x1, y1))
+            return
         rect = QtCore.QRectF(QtCore.QPointF(x0, y0), QtCore.QPointF(x1, y1)).normalized()
         self.preview.setRect(rect)
         self.preview.show()
@@ -137,7 +169,7 @@ class DrawViewBox(pg.ViewBox):
     def mouseClickEvent(self, event):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             event.accept()
-            if event.double():
+            if event.double() and self.mode == 'roi':
                 self.cancel_preview()
                 self.reset_requested.emit()
             return
@@ -151,12 +183,18 @@ class DrawViewBox(pg.ViewBox):
 
 class CameraPanel(QtWidgets.QFrame):
     roi_changed = QtCore.Signal(str, object)
+    level_changed = QtCore.Signal(str, float)
     view_requested = QtCore.Signal(str)
     HINT = ('<b>Drag</b> set ROI &nbsp;·&nbsp; <b>Right-drag</b> pan &nbsp;·&nbsp; '
             '<b>Wheel</b> zoom &nbsp;·&nbsp; <b>Double-click</b> clear ROI')
     ROI_HELP = ('YOLO region of interest, in native camera pixels.\n'
                 'Drag on the image to set it; double-click to clear it.')
     HUD_HELP = 'Received/decoded stereo FPS (not sensor FPS) · latest frame delay'
+    LEVEL_HINT = ('<b>Drag along the conveyor</b> to level this camera &nbsp;·&nbsp; '
+                  '<b>Esc</b> or the Level button cancels')
+    LEVEL_HELP = ('Level this camera: click, then drag a line along the conveyor.\n'
+                  'The image turns so that line is horizontal (or vertical, if it was closer\n'
+                  'to vertical). Draw again on the levelled image to fine-tune.')
 
     def __init__(self, side, color, parent=None):
         super().__init__(parent)
@@ -165,6 +203,7 @@ class CameraPanel(QtWidgets.QFrame):
         self.native_shape = (1920, 1080)
         self.roi_box = None
         self.bounds = None
+        self.angle = 0.0
         self._updating = False
         self._has_image = False
         self._stale = False
@@ -200,6 +239,22 @@ class CameraPanel(QtWidgets.QFrame):
         self.roi_clear.setToolTip('Clear the ROI · YOLO uses the full frame again')
         self.roi_clear.clicked.connect(self.clear_roi)
         self.roi_clear.hide()
+        self.level_info = QtWidgets.QLabel('')
+        self.level_info.setObjectName('pill')
+        self.level_info.setFont(ui_font(12))
+        self.level_info.hide()
+        self.level_clear = QtWidgets.QToolButton()
+        self.level_clear.setIcon(icon('close', COLORS['secondary'], 12))
+        self.level_clear.setIconSize(QtCore.QSize(12, 12))
+        self.level_clear.setToolTip('Undo the levelling · show the camera image as it arrives')
+        self.level_clear.clicked.connect(self.reset_level)
+        self.level_clear.hide()
+        self.level_button = QtWidgets.QToolButton()
+        self.level_button.setCheckable(True)
+        self.level_button.setIcon(icon('level', COLORS['secondary']))
+        self.level_button.setIconSize(QtCore.QSize(16, 16))
+        self.level_button.setToolTip(self.LEVEL_HELP)
+        self.level_button.toggled.connect(self.start_levelling)
         self.hud_label = QtWidgets.QLabel('')
         self.hud_label.setObjectName('hud')
         self.hud_label.setFont(numeric_font(12))
@@ -222,14 +277,18 @@ class CameraPanel(QtWidgets.QFrame):
         hdr.addWidget(self.detect_count)
         hdr.addWidget(self.info)
         hdr.addWidget(self.roi_clear)
+        hdr.addWidget(self.level_info)
+        hdr.addWidget(self.level_clear)
         hdr.addStretch()
         hdr.addWidget(self.hud_label)
         hdr.addSpacing(4)
         hdr.addWidget(self.fit_button)
+        hdr.addWidget(self.level_button)
         hdr.addWidget(self.view_toggle)
         layout.addWidget(header)
         self._header_widgets = (badge, self.title, self.detect_count, self.info, self.roi_clear,
-                                self.hud_label, self.fit_button, self.view_toggle)
+                                self.level_info, self.level_clear, self.hud_label, self.fit_button,
+                                self.level_button, self.view_toggle)
 
         video = QtWidgets.QWidget()
         grid = QtWidgets.QGridLayout(video)
@@ -292,6 +351,7 @@ class CameraPanel(QtWidgets.QFrame):
         self._hint_timer.timeout.connect(self.hint.hide)
         self.graphics.installEventFilter(self)
         self.vbox.selected.connect(self._new_selection)
+        self.vbox.line_drawn.connect(self._line_drawn)
         self.vbox.reset_requested.connect(self.clear_roi)
         self.vbox.sigRangeChanged.connect(self._range_changed)
         self.overlay.show_state('info', '◌', 'Waiting for video', self._waiting_text)
@@ -300,8 +360,10 @@ class CameraPanel(QtWidgets.QFrame):
     def eventFilter(self, obj, event):
         if obj is self.graphics:
             if event.type() == QtCore.QEvent.Type.Enter and self._has_image:
+                self.hint.setText(self.LEVEL_HINT if self.levelling() else self.HINT)
                 self.hint.show()
-                self._hint_timer.start()
+                if not self.levelling():
+                    self._hint_timer.start()
             elif event.type() == QtCore.QEvent.Type.Leave:
                 self.hint.hide()
         return False
@@ -397,6 +459,59 @@ class CameraPanel(QtWidgets.QFrame):
         bottom = max(0, min(h, int(max(y0, y1))))
         if right-left >= 16 and bottom-top >= 16:
             self._set_roi((left, top, right, bottom), emit=True)
+
+    # ---- Levelling: turn the image so the conveyor runs straight ------------
+    def levelling(self):
+        return self.vbox.mode == 'line'
+
+    def start_levelling(self, on=True):
+        """Arm (or cancel) line mode: the next left drag draws the conveyor line."""
+        on = bool(on) and self._has_image
+        if self.level_button.isChecked() != on:
+            self.level_button.blockSignals(True)
+            self.level_button.setChecked(on)
+            self.level_button.blockSignals(False)
+        self.vbox.set_mode('line' if on else 'roi')
+        self.level_button.setIcon(icon('level', COLORS['accent'] if on else COLORS['secondary']))
+        if on:
+            self._hint_timer.stop()
+            self.hint.setText(self.LEVEL_HINT)
+            self.hint.show()
+        else:
+            self.hint.hide()
+            self.hint.setText(self.HINT)
+
+    def _line_drawn(self, line):
+        correction = line_correction(*line)
+        self.start_levelling(False)
+        if correction is None:
+            self.hint.setText('Line too short · click Level and drag further along the conveyor')
+            self.hint.show()
+            self._hint_timer.start()
+            return
+        self.set_angle(self.angle + correction, emit=True)
+
+    def reset_level(self):
+        self.start_levelling(False)
+        self.set_angle(0.0, emit=True)
+
+    def set_angle(self, angle, emit):
+        """Show this camera's rotation; with emit, ask the window to apply it."""
+        self.angle = normalize_angle(angle)
+        levelled = bool(self.angle)
+        if levelled:
+            self.level_info.setText(f'Level {format_angle(self.angle)}')
+            turn = 'counter-clockwise' if self.angle > 0 else 'clockwise'
+            self.level_info.setToolTip(
+                f'This camera is turned {format_angle(abs(self.angle))} {turn} so the conveyor\n'
+                'runs straight. Display, ROI and YOLO all use the turned image.\n'
+                'Use the Level button to draw again, or × to undo.')
+        set_state(self.level_info, 'active' if levelled else '')
+        self.level_info.setVisible(levelled)
+        self.level_clear.setVisible(levelled)
+        self._fit_header()
+        if emit:
+            self.level_changed.emit(self.side, self.angle)
 
     def clear_roi(self):
         """Reset YOLO crop to full image without changing the current zoom."""
@@ -591,6 +706,7 @@ class Studio(QtWidgets.QMainWindow):
         self._preferences = QtCore.QSettings('AIEngineering', 'StereoVisionStudio')
         self.image_settings = load_settings(self._preferences)
         self._image_lut = build_lut(self.image_settings)
+        self.level_angles = load_angles(self._preferences)
         self.image_dialog = None
         self.annotation_options = load_annotation_options(self._preferences)
         self.annotation_popover = None
@@ -726,6 +842,8 @@ class Studio(QtWidgets.QMainWindow):
         self.right_panel = CameraPanel('RIGHT', COLORS['accent'])
         for panel in (self.left_panel, self.right_panel):
             panel.roi_changed.connect(self._roi_changed)
+            panel.level_changed.connect(self._level_changed)
+            panel.set_angle(self.level_angles[panel.side], emit=False)
             panel.view_requested.connect(self.change_view)
             panel.set_waiting_text(self._listen_text())
             panel.set_annotation_options(self.annotation_options)
@@ -779,7 +897,7 @@ class Studio(QtWidgets.QMainWindow):
                      ('2', lambda: self.change_view('left')),
                      ('3', lambda: self.change_view('right')),
                      ('F', self.toggle_fullscreen),
-                     ('Escape', self.showMaximized),
+                     ('Escape', self._escape),
                      ('D', self.analysis.toggle_diagnostics),
                      ('P', self.analysis.toggle_pause),
                      ('L', self._cycle_annotation_preset),
@@ -950,6 +1068,31 @@ class Studio(QtWidgets.QMainWindow):
         if self.yolo:
             self.yolo.set_roi(side, bounds)
         # ROI coordinates are already shown directly in the camera header.
+
+    def _escape(self):
+        """Esc cancels drawing a levelling line first, then leaves full screen."""
+        drawing = [p for p in (self.left_panel, self.right_panel) if p.levelling()]
+        for panel in drawing:
+            panel.start_levelling(False)
+        if not drawing:
+            self.showMaximized()
+
+    def _level_changed(self, side, angle):
+        """Apply and remember one camera's rotation; boxes from the old image are dropped."""
+        self.level_angles[side] = angle
+        save_angle(self._preferences, side, angle)
+        panel = self.left_panel if side == 'LEFT' else self.right_panel
+        if self.yolo:
+            self.yolo.set_roi(side, panel.bounds)  # clears results computed on the old image
+        if self.last_recv_frame is not None:
+            # Show the new angle at once, even when the stream is paused or stalled.
+            views = split_stereo(self._prepare_frame(self.last_recv_frame))
+            panel.set_image(views[0] if side == 'LEFT' else views[1])
+
+    def _prepare_frame(self, frame):
+        """Client-side image adjustments, then levelling: what is shown and what YOLO sees."""
+        adjusted = apply_to_stereo_frame(frame, self._image_lut, video_height(frame.shape[0]))
+        return level_stereo_frame(adjusted, self.level_angles)
 
     def _analysis_tab_changed(self, tab):
         self._schedule_layout()  # the Detections tab asks for a taller dashboard
@@ -1280,10 +1423,9 @@ class Studio(QtWidgets.QMainWindow):
         self.last_frame_monotonic = now
         self.frame_arrival_times.append(now)
         self.last_recv_frame = frame
-        source_h = video_height(frame.shape[0])
         # The raw source is retained for timestamp/CRC decoding and Diagnostics.
-        # Client-specific LUT adjustments affect BOTH the preview and YOLO input.
-        adjusted_frame = apply_to_stereo_frame(frame, self._image_lut, source_h)
+        # Client-specific LUT adjustments and levelling affect BOTH the preview and YOLO input.
+        adjusted_frame = self._prepare_frame(frame)
         left_view, right_view = split_stereo(adjusted_frame)
         shape_before = self.left_panel.native_shape
         self.left_panel.set_image(left_view)
@@ -1633,6 +1775,33 @@ def self_test():
     assert panel.vbox.state['mouseEnabled'] == [True, True]
     panel.vbox.reset_requested.emit()
     assert panel.bounds is None and not panel.roi_mask.isVisible()
+    # Levelling: the Level button arms line mode; a drawn line turns the camera; × undoes it.
+    angles = []
+    panel.level_changed.connect(lambda side, angle: angles.append((side, angle)))
+    panel.level_button.click()
+    assert panel.levelling() and panel.level_button.isChecked()
+    panel.vbox.line_drawn.emit((100.0, 100.0, 500.0, 100.0 + 400.0 * np.tan(np.radians(4.0))))
+    assert not panel.levelling() and not panel.level_button.isChecked()
+    assert panel.angle == 4.0 and angles[-1] == ('LEFT', 4.0)
+    assert panel.level_info.isVisibleTo(panel) and panel.level_info.text() == 'Level 4°'
+    panel.vbox.line_drawn.emit((0.0, 0.0, 300.0, -300.0 * np.tan(np.radians(1.5))))
+    assert panel.angle == 2.5, 'a second line on the levelled image fine-tunes the angle'
+    panel.start_levelling(True)
+    panel.vbox.line_drawn.emit((10.0, 10.0, 20.0, 12.0))
+    assert panel.angle == 2.5 and not panel.levelling(), 'a short drag changes nothing'
+    panel.start_levelling(True)
+    panel.vbox.reset_requested.emit()
+    panel.start_levelling(False)
+    assert panel.vbox.mode == 'roi'
+    panel.level_clear.click()
+    assert panel.angle == 0.0 and angles[-1] == ('LEFT', 0.0)
+    assert not panel.level_info.isVisibleTo(panel) and not panel.level_clear.isVisibleTo(panel)
+    panel.set_angle(-3.25, emit=False)
+    assert panel.level_info.text() == 'Level −3.25°' and angles[-1] == ('LEFT', 0.0)
+    panel.set_angle(0.0, emit=False)
+    blank = CameraPanel('RIGHT', '#70e4a6')
+    blank.start_levelling(True)
+    assert not blank.levelling() and not blank.level_button.isChecked(), 'no image, nothing to level'
     panel.set_stale(THRESHOLDS.stream_disconnected_after_s + 1)
     assert panel.overlay.title.text() == 'No signal' and panel.stale_cover.isVisible()
     panel.set_stale(0.0)
