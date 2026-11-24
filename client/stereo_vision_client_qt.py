@@ -8,6 +8,7 @@ Install: python -m pip install PySide6 pyqtgraph
 Run: python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11
 Optional YOLO: --yolo-model C:/models/best.pt --yolo-device 0
 Model library: --model-library http://SERVER_IP:8765 [--library-via THIS_PC_IP]
+               (defaults: STEREO_LIBRARY_URL / STEREO_LIBRARY_VIA environment variables)
   then choose a model with the Model button, or --yolo-model library:NAME
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ import argparse
 import collections
 import concurrent.futures
 import dataclasses
+import os
 import sys
 import time
 from pathlib import Path
@@ -1598,12 +1600,14 @@ def build_parser():
     p.add_argument('--no-time-sync', action='store_true')
     p.add_argument('--yolo-model', default=None,
                    help='YOLO model file on this PC, or library:NAME for a model from --model-library')
-    p.add_argument('--model-library', default=None,
+    p.add_argument('--model-library', default=os.environ.get('STEREO_LIBRARY_URL') or None,
                    help='Model library on the camera server, e.g. http://SERVER_IP:8765. Use the '
-                        'server address on the network that does NOT carry the video.')
-    p.add_argument('--library-via', default=None,
+                        'server address on the network that does NOT carry the video. '
+                        'Default: the STEREO_LIBRARY_URL environment variable.')
+    p.add_argument('--library-via', default=os.environ.get('STEREO_LIBRARY_VIA') or None,
                    help="This PC's IP on the network to download models over (e.g. its Wi-Fi IP). "
-                        'Needed when two adapters share one subnet.')
+                        'Needed when two adapters share one subnet. '
+                        'Default: the STEREO_LIBRARY_VIA environment variable.')
     p.add_argument('--model-cache', default=None,
                    help='Folder for downloaded models (default %%LOCALAPPDATA%%\\StereoVisionStudio\\models)')
     p.add_argument('--yolo-conf', type=float, default=0.35)
@@ -1841,6 +1845,11 @@ def self_test():
     return 0
 
 
+def env_note(parser, dest, variable):
+    """' (from VARIABLE)' when an option's value came from the environment, not the command line."""
+    return f' (from the {variable} environment variable)' if parser.get_default(dest) and         not any(a.startswith('--' + dest.replace('_', '-')) for a in sys.argv[1:]) else ''
+
+
 def main():
     p = build_parser()
     args = p.parse_args()
@@ -1854,7 +1863,11 @@ def main():
         try:
             LibraryClient(args.model_library)
         except ValueError as exc:
-            p.error(str(exc))
+            p.error(f'{exc}{env_note(p, "model_library", "STEREO_LIBRARY_URL")}')
+        try:
+            LibraryClient(args.model_library, source_ip=args.library_via)
+        except ValueError as exc:
+            p.error(f'--library-via: {exc}{env_note(p, "library_via", "STEREO_LIBRARY_VIA")}')
     app = QtWidgets.QApplication(sys.argv[:1])
     apply_theme(app)
     if args.self_test:

@@ -111,11 +111,11 @@ class UploadTest(unittest.TestCase):
         script = ROOT / 'tools' / 'upload_model.py'
         url = f'http://127.0.0.1:{port}'
 
-        def run(*args, token=TOKEN):
+        def run(*args, token=TOKEN, via='127.0.0.1'):
             env = {'PATH': '', 'SYSTEMROOT': __import__('os').environ.get('SYSTEMROOT', '')}
             if token:
                 env['STEREO_LIBRARY_TOKEN'] = token
-            return subprocess.run([sys.executable, '-I', str(script), *args, '--server', url, '--via', '127.0.0.1'],
+            return subprocess.run([sys.executable, '-I', str(script), *args, '--server', url, '--via', via],
                                   capture_output=True, text=True, env=env, timeout=60)
 
         result = run(str(model), '--name', 'belt-v5', '--classes', 'Ajwa,Medjool', '--description', 'from test')
@@ -129,6 +129,9 @@ class UploadTest(unittest.TestCase):
         result = run(str(model), '--name', 'x', token='wrong')
         self.assertEqual(result.returncode, 1)
         self.assertIn('Wrong or missing upload token', result.stderr)
+        result = run('--list', via='CLIENT_WIFI_IP')  # a placeholder left in the command
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("'CLIENT_WIFI_IP' is not an IPv4 address", result.stderr)
 
 
 if __name__ == '__main__':

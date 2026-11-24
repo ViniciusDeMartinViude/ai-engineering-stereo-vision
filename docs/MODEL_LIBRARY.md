@@ -65,7 +65,7 @@ setx STEREO_LIBRARY_TOKEN <the token>
 setx STEREO_LIBRARY_VIA <this computer's Wi-Fi IP>
 ```
 
-Open a new terminal after `setx`. `STEREO_LIBRARY_VIA` is only needed when that computer has Wi‑Fi and Ethernet on the same `192.168.0.x` subnet (like the student PCs). A laptop on Wi‑Fi only can leave it out.
+Open a new terminal after `setx`. The client reads the same `STEREO_LIBRARY_URL` and `STEREO_LIBRARY_VIA`, so on a student PC these settings serve both uploading and downloading. `STEREO_LIBRARY_VIA` is only needed when that computer has Wi‑Fi and Ethernet on the same `192.168.0.x` subnet (like the student PCs). A laptop on Wi‑Fi only can leave it out.
 
 **3. Upload**, with whichever script fits that computer:
 
@@ -92,22 +92,36 @@ Typical refusals and what they mean:
 | `Uploads are only accepted on 192.168.0.102` | You used the wired address; use the Wi‑Fi one, plus `--via` |
 | `Cannot reach the library ... timed out` | Firewall on the camera PC (TCP 8765, see below), different Wi‑Fi, or missing `--via` |
 | `not an address of this computer` | `--via` must be this computer's own Wi‑Fi IP (`ipconfig`) |
+| `'CLIENT_WIFI_IP' is not an IPv4 address` | A placeholder or name was left in `--via` or `STEREO_LIBRARY_VIA`; put the real IP there |
 | `.engine is not accepted` | Upload the `.pt` (or `.onnx`); TensorRT engines are tied to one GPU |
 
 The token travels unencrypted over HTTP. That's fine on your own classroom Wi‑Fi, but don't use it across networks you don't control.
 
 ## On each student PC: choose a model
 
+Set the library address once per PC. Use the camera PC's Wi‑Fi address, and this PC's own Wi‑Fi IP from `ipconfig` (the example below uses `192.168.0.12`):
+
 ```powershell
-python client/stereo_vision_client_qt.py --iface-ip CLIENT_ETHERNET_IP --time-server SERVER_ETHERNET_IP --model-library http://SERVER_WIFI_IP:8765 --library-via CLIENT_WIFI_IP
+setx STEREO_LIBRARY_URL http://192.168.0.102:8765
 ```
+```powershell
+setx STEREO_LIBRARY_VIA 192.168.0.12
+```
+
+Then, in a new terminal, start the client as usual, with this PC's Ethernet IP:
+
+```powershell
+python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11 --time-server 192.168.0.10
+```
+
+The `--model-library` and `--library-via` options do the same for one run and override the variables. Names in capitals in these docs, such as `CLIENT_WIFI_IP`, are placeholders: the client refuses a `--library-via` that is not an IP address and says so, instead of failing later with `getaddrinfo failed`.
 
 Click **Model** in the app bar (shortcut `M`). Each model shows its classes, size and date, and its state on this PC: *Active*, *Downloaded*, *↓ 5.2 MB* (not downloaded yet) or *Downloading NN %*. Clicking a model downloads it if needed and switches detection to it. ROIs carry over, and old boxes are cleared. **Turn detection off** stops YOLO.
 
 | Client option | Meaning |
 |---|---|
-| `--model-library URL` | The camera server's library, `http://IP:8765` |
-| `--library-via IP` | This PC's address on the network to download over (pins the adapter; see below) |
+| `--model-library URL` | The camera server's library, `http://IP:8765`. Default: `STEREO_LIBRARY_URL` |
+| `--library-via IP` | This PC's address on the network to download over (pins the adapter; see below). Default: `STEREO_LIBRARY_VIA` |
 | `--yolo-model library:NAME` | Start with this library model (downloads it first if needed) |
 | `--yolo-model PATH` | A local model file, as before |
 | `--model-cache DIR` | Download folder (default `%LOCALAPPDATA%\StereoVisionStudio\models`) |
@@ -117,6 +131,8 @@ The client remembers the last library model per PC and loads it again at the nex
 ```powershell
 python tools/model_library.py check http://SERVER_WIFI_IP:8765 --via CLIENT_WIFI_IP
 ```
+
+`check` also reads `STEREO_LIBRARY_VIA` when `--via` is left out.
 
 ## Two networks today, VLANs later
 
@@ -163,6 +179,7 @@ On the camera PC (2× MX Brio, RTX 5070, Python 3.12, Ultralytics 8.4 with CPU P
   - The same upload to the wired address was refused, as were a wrong token and a non-model file.
   - `upload_model.cmd` (PowerShell 5.1) replaced the model and listed the library, and refused a wrong token and a wrong `-Via` address with clear messages.
   - The uploads were also sent from the camera PC itself, so uploading from a separate computer is still to be checked.
+- A unit test checks that `--library-via` / `--via` placeholders and host names are refused with a clear message. On the camera PC, `STEREO_LIBRARY_URL` and `STEREO_LIBRARY_VIA` set to its Wi‑Fi address let `check` and the client list and download a model without any library options.
 - Server console and client self-tests cover the Library pill, the Models tab and the model picker.
 - Live run: published a trained `best.pt` with its four classes read from the model. Listed it with `check ... --via 192.168.0.102` and started a client with `--yolo-model library:...`. The client downloaded 5.2 MB over the Wi‑Fi address in 1.4 s (the 30 Mbit/s cap) and ran detection (about 25–40 ms per pair on CPU).
 - A second model published while everything was running appeared in the picker. Clicking it downloaded and switched detection live.

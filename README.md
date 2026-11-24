@@ -107,6 +107,8 @@ python tools/model_library.py add best.pt --name belt-v3
 python client/stereo_vision_client_qt.py --iface-ip CLIENT_IP --time-server SERVER_IP --model-library http://SERVER_WIFI_IP:8765 --library-via CLIENT_WIFI_IP
 ```
 
+Replace the capitalised placeholders with real addresses. Or set `STEREO_LIBRARY_URL` and `STEREO_LIBRARY_VIA` once with `setx`; the client and the upload scripts both read them, so the two library options can be left out.
+
 To publish from another computer over Wi‑Fi (a training PC, for example), create an upload token on the camera PC with `python tools/model_library.py token`. Then run `tools/upload_model.py` (Python, standard library only) or `tools/upload_model.cmd` (PowerShell, no Python needed) on that computer.
 
 See [Model library](docs/MODEL_LIBRARY.md) for the two-network setup (download over Wi‑Fi until the VLAN switch arrives), uploads, the firewall and offline use.

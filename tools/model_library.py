@@ -13,6 +13,7 @@ to the clients; it picks up changes without a restart. Files copied straight
 into the folder are indexed automatically under their file name.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -54,7 +55,8 @@ def main():
     remove.add_argument('name')
     check = sub.add_parser('check', help='list a running library from another PC, as a client would')
     check.add_argument('url', help=f'e.g. http://SERVER_IP:{DEFAULT_PORT}')
-    check.add_argument('--via', help='local IP to connect from (pins the network adapter)')
+    check.add_argument('--via', default=os.environ.get('STEREO_LIBRARY_VIA'),
+                       help='local IP to connect from, pins the network adapter (env STEREO_LIBRARY_VIA)')
     token = sub.add_parser('token', help='create or show the token that allows uploads from other computers')
     token.add_argument('--new', action='store_true', help='replace the token (old copies stop working)')
     token.add_argument('--file', default=str(DEFAULT_TOKEN_FILE),

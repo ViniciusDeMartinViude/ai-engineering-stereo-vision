@@ -33,6 +33,7 @@ import hashlib
 import hmac
 import http.client
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -673,6 +674,22 @@ class ModelLibraryServer:
             }
 
 
+def check_source_ip(value):
+    """The local IPv4 address to connect from, or None. Rejects names and placeholders.
+
+    A host name here would be looked up by DNS and fail with a cryptic
+    "getaddrinfo failed"; say what is expected instead.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        raise ValueError(f"{text!r} is not an IPv4 address. Give this PC's own address on the network "
+                         "to download over, e.g. its Wi-Fi IP from ipconfig (like 192.168.0.12)") from None
+
+
 def default_cache_dir():
     base = os.environ.get('LOCALAPPDATA') or os.path.join(Path.home(), '.cache')
     return Path(base) / 'StereoVisionStudio' / 'models'
@@ -689,7 +706,7 @@ class LibraryClient:
         self.host = parts.hostname
         self.port = parts.port or DEFAULT_PORT
         self.base_url = f'http://{self.host}:{self.port}'
-        self.source_ip = source_ip or None
+        self.source_ip = check_source_ip(source_ip)
         self.timeout = timeout
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
 
