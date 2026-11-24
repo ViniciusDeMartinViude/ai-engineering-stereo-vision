@@ -5,6 +5,8 @@
   python tools/model_library.py list
   python tools/model_library.py remove belt-v2
   python tools/model_library.py check http://192.168.0.102:8765 --via 192.168.0.12
+  python tools/model_library.py token          (create / show the upload token)
+  python tools/model_library.py token --new    (replace it; old copies stop working)
 
 The server (stereo_vision_server_multiclient.py) serves this folder read-only
 to the clients; it picks up changes without a restart. Files copied straight
@@ -18,10 +20,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'common'))
 
 from model_library import (  # noqa: E402
-    DEFAULT_PORT, LibraryClient, LibraryError, LibraryStore, format_size,
+    DEFAULT_PORT, LibraryClient, LibraryError, LibraryStore, format_size, load_upload_token,
+    new_upload_token, save_upload_token,
 )
 
 DEFAULT_FOLDER = ROOT / 'models'
+DEFAULT_TOKEN_FILE = ROOT / 'config' / 'library-upload.token'
 
 
 def show(entries):
@@ -51,7 +55,26 @@ def main():
     check = sub.add_parser('check', help='list a running library from another PC, as a client would')
     check.add_argument('url', help=f'e.g. http://SERVER_IP:{DEFAULT_PORT}')
     check.add_argument('--via', help='local IP to connect from (pins the network adapter)')
+    token = sub.add_parser('token', help='create or show the token that allows uploads from other computers')
+    token.add_argument('--new', action='store_true', help='replace the token (old copies stop working)')
+    token.add_argument('--file', default=str(DEFAULT_TOKEN_FILE),
+                       help=f'token file (default {DEFAULT_TOKEN_FILE}; same as the server --upload-token-file)')
     args = parser.parse_args()
+
+    if args.command == 'token':
+        existing = load_upload_token(args.file)
+        if existing and not args.new:
+            value, action = existing, 'Upload token (existing)'
+        else:
+            value = new_upload_token()
+            save_upload_token(args.file, value)
+            action = 'New upload token saved'
+        print(f'{action}: {args.file}')
+        print(value)
+        print('Copy it to the computers that may upload, e.g. setx STEREO_LIBRARY_TOKEN "<token>".')
+        print('Restart the server to apply a new token. Treat it like a password: anyone with it can')
+        print('publish models that every client may load.')
+        return 0
 
     try:
         if args.command == 'check':
