@@ -98,6 +98,7 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
 - Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO. Each camera's ROI is remembered on this PC. At the next start it's applied to the first frame. If the camera resolution changed but has the same shape, the ROI is scaled. If the shape changed (e.g. 640×480 → 1920×1080), it isn't applied, because the view is different. A hint says so, and the ROI is kept for when that resolution returns.
 - **Output** pill: publishes both cameras' detections as JSON over UDP for another program (e.g. a robot backend). It shows the send rate and ripples on each message; click it for the switch, destination and the latest message. See [Detection output](DETECTION_OUTPUT.md)
+- **Colour themes** (palette button in the app bar, shortcut `T`): ten themes, the original plus nine inspired by popular VS Code themes. See [Colour themes](#colour-themes)
 - **Speed** per camera (gauge button in the camera header): shows each tracked object's speed on its label (`#7 · 142 mm/s`, or `still`), with an arrow to where it will be in half a second. See [Object speed](#object-speed)
 - **Magnifier** while you drag an ROI or a levelling line: a 200-pixel window in a corner of the camera tile enlarges the image around the pointer about 4× (up to 12× native pixels), without smoothing. The box or line you're drawing and a crosshair are drawn on top. It follows new frames, and it moves to another corner when the pointer or the drag's start point comes near it. Once **Level** is armed, it also shows while you hover, so you can place the start of the line.
 - **Level** per camera, for cameras that aren't square to the conveyor: click the spirit-level button, then drag a line along the conveyor, and the image turns so the belt runs straight (see [Levelling the cameras](#levelling-the-cameras))
@@ -107,7 +108,7 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - Delay/skew history with threshold bands, mean line and hover readout; Diagnostics with the field-annotated 168-bit CRC16 barcode
 - Original incoming frames unchanged; client-only image adjustments affect display and YOLO input only
 
-Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` cancels a levelling line or returns to the maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets, `M` choose the YOLO model.
+Keyboard: `1` both cameras, `2` left, `3` right, `F` fullscreen, `Esc` cancels a levelling line or returns to the maximized window, `D` Diagnostics, `P` pause the chart or detections table, `L` cycle label presets, `M` choose the YOLO model, `T` choose the colour theme.
 
 With `--model-library http://SERVER_IP:8765`, the **Model** button lists the camera server's trained models and switches detection to the one you pick, downloading it first if needed. See [Model library](MODEL_LIBRARY.md).
 
@@ -131,6 +132,23 @@ What is turned:
 - It costs about 4 ms per frame for one 1920×1080 camera, and 6 ms for both, on the camera PC's CPU.
 
 This is a 2D rotation for viewing and detection, not stereo calibration. It doesn't correct lens distortion or perspective, and depth measurements will need a proper calibration later.
+
+## Colour themes
+
+Click the **palette** button at the right of the app bar (or press `T`) and pick a theme. Each card is a miniature of the client in that theme's colours.
+
+| Theme | Inspired by |
+|---|---|
+| Control Room | The client's original dark theme (default) |
+| Dark Modern / Light Modern | VS Code's default dark and light themes |
+| Monokai, Dracula, One Dark Pro, Nord | The popular VS Code themes of those names |
+| Solarized Dark / Solarized Light | The Solarized themes |
+| Dark High Contrast | VS Code's Dark High Contrast theme |
+
+- **Choosing a theme rebuilds the window** in the new colours. The video reconnects and the YOLO model reloads, which took 2–3 s on the camera PC. ROIs, levelling, speed, output and the model choice come back from the PC's settings. The camera view and full screen are kept.
+- The choice is remembered on this PC. `--theme NAME` (e.g. `--theme light-modern`) uses a theme for one run without changing the saved choice.
+- **Video overlays don't change.** Boxes, labels, the ROI, speed arrows and the waiting or no-signal overlays keep the same colours in every theme, because they are drawn on the camera image, not on the window.
+- The palettes are adjusted for readability. `tests/test_themes.py` checks that, in every theme, text, captions, state colours (OK / Watch / High) and the accent meet WCAG AA contrast (4.5:1) on the surfaces they're used on. Light themes suit bright rooms or projectors. Dark High Contrast has the strongest contrast.
 
 ## Object speed
 

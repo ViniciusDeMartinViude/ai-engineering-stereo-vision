@@ -60,7 +60,9 @@ from detection_annotations import (
     load_annotation_options, next_preset, preset_of, save_annotation_options,
 )
 from icons import icon, pixmap
-from theme import (COLORS, THRESHOLDS, apply_theme, class_color, display_font,
+from theme_picker import ThemePopover
+import theme as theme_module
+from theme import (COLORS, THRESHOLDS, VIDEO_INK, apply_theme, class_color, display_font,
                    numeric_font, quality, tint, ui_font)
 from status_limits import LimitsDialog, load_thresholds, save_thresholds
 from control_room_widgets import (
@@ -68,9 +70,14 @@ from control_room_widgets import (
     DiagnosticsPanel, LatencyChart, DelayAxis, StateOverlay, set_state,
 )
 
-# pyqtgraph uses [row, column, channel] throughout this client.
-pg.setConfigOptions(imageAxisOrder='row-major', antialias=True,
-                    background=COLORS['surface'], foreground=COLORS['secondary'])
+def configure_pyqtgraph():
+    """pyqtgraph defaults for this client; again after a theme change."""
+    # pyqtgraph uses [row, column, channel] throughout this client.
+    pg.setConfigOptions(imageAxisOrder='row-major', antialias=True,
+                        background=COLORS['surface'], foreground=COLORS['secondary'])
+
+
+configure_pyqtgraph()
 
 APP_MARGIN = 12
 TILE_HEADER_H = 40
@@ -119,7 +126,7 @@ class DrawViewBox(pg.ViewBox):
         self.addItem(self.preview, ignoreBounds=True)
         self.preview.hide()
         # Live size readout while dragging, in native camera pixels.
-        self.preview_label = pg.TextItem('', color=COLORS['background'],
+        self.preview_label = pg.TextItem('', color=VIDEO_INK,
                                          fill=pg.mkBrush(COLORS['roi']), anchor=(0, 1))
         self.preview_label.setFont(numeric_font(12, QtGui.QFont.Weight.DemiBold))
         self.preview_label.setZValue(101)
@@ -383,7 +390,7 @@ class CameraPanel(QtWidgets.QFrame):
         self.roi_mask.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
         self.vbox.addItem(self.roi_mask, ignoreBounds=True)
         self.roi_mask.hide()
-        self.roi_tag = pg.TextItem('ROI', color=COLORS['background'],
+        self.roi_tag = pg.TextItem('ROI', color=VIDEO_INK,
                                    fill=pg.mkBrush(COLORS['roi']), anchor=(0, 1))
         self.roi_tag.setFont(ui_font(11, QtGui.QFont.Weight.Bold))
         self.roi_tag.setZValue(56)
@@ -822,7 +829,7 @@ class CameraPanel(QtWidgets.QFrame):
             rect.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             self.vbox.addItem(rect, ignoreBounds=True)
             self.box_items.append(rect)
-            label = pg.TextItem('', color=COLORS['background'],
+            label = pg.TextItem('', color=VIDEO_INK,
                                 fill=pg.mkBrush(COLORS['accent']), anchor=(0, 1))
             label.setFont(ui_font(12, QtGui.QFont.Weight.DemiBold))
             label.setZValue(22)
@@ -859,7 +866,7 @@ class CameraPanel(QtWidgets.QFrame):
         if options.center_marker and drawn:
             self.center_markers.setData(
                 pos=[d.center for d in drawn], symbol='crosshair', size=17,
-                pen=pg.mkPen(COLORS['background'], width=1),
+                pen=pg.mkPen(VIDEO_INK, width=1),
                 brush=[pg.mkBrush(class_color(d.label)) for d in drawn])
             self.center_markers.setVisible(True)
         elif self.center_markers.isVisible():
@@ -1072,11 +1079,20 @@ class Studio(QtWidgets.QMainWindow):
         self.labels_button.clicked.connect(self._toggle_annotation_popover)
         self.image_button.clicked.connect(self._toggle_image_dialog)
         row.addWidget(self.labels_button)
+        self.theme_button = QtWidgets.QToolButton()
+        self.theme_button.setIcon(icon('palette', COLORS['secondary']))
+        self.theme_button.setIconSize(QtCore.QSize(16, 16))
+        self.theme_button.setFixedSize(32, 32)
+        self.theme_button.setToolTip(
+            f'Colour theme: {theme_module.THEMES[theme_module.CURRENT_THEME]["name"]} · shortcut T')
+        self.theme_button.clicked.connect(self._toggle_theme_popover)
+        self.theme_popover = None
         self.fullscreen_button = QtWidgets.QToolButton()
         self.fullscreen_button.setIconSize(QtCore.QSize(16, 16))
         self.fullscreen_button.setFixedSize(32, 32)
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
         row.addWidget(self.image_button)
+        row.addWidget(self.theme_button)
         row.addWidget(self.fullscreen_button)
         self._set_image_button_active(self._image_lut is not None)
         self._update_fullscreen_button()
@@ -1168,7 +1184,8 @@ class Studio(QtWidgets.QMainWindow):
                      ('D', self.analysis.toggle_diagnostics),
                      ('P', self.analysis.toggle_pause),
                      ('L', self._cycle_annotation_preset),
-                     ('M', self._toggle_model_popover)]
+                     ('M', self._toggle_model_popover),
+                     ('T', self._toggle_theme_popover)]
         for key, action in shortcuts:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(action)
@@ -2045,6 +2062,23 @@ class Studio(QtWidgets.QMainWindow):
         if self.output_popover is not None and self.output_popover.isVisible():
             self.output_popover.show_status(status)
 
+    # ---- Colour theme ---------------------------------------------------------------
+    def _toggle_theme_popover(self):
+        if self.theme_popover is None:
+            self.theme_popover = ThemePopover(self)
+            self.theme_popover.theme_chosen.connect(self._choose_theme)
+        if self.theme_popover.isVisible():
+            self.theme_popover.close()
+            return
+        self.theme_popover.set_current(theme_module.CURRENT_THEME)
+        self._place_under(self.theme_popover, self.theme_button)
+        self.theme_popover.show()
+
+    def _choose_theme(self, key):
+        """Remember the theme and rebuild the window in it (after this event returns)."""
+        theme_module.save_theme_setting(self._preferences, key)
+        QtCore.QTimer.singleShot(0, lambda: rebuild_window(self, key))
+
     def _toggle_output_popover(self):
         if self.output_popover is None:
             self.output_popover = OutputPopover(self)
@@ -2092,12 +2126,44 @@ class Studio(QtWidgets.QMainWindow):
             self.model_popover.close()
         if self.output_popover is not None:
             self.output_popover.close()
+        if self.theme_popover is not None:
+            self.theme_popover.close()
         if self.yolo:
             self.yolo.stop()
         self.publisher.close()
         if self.reader:
             self.reader.stop()
         super().closeEvent(event)
+
+
+_WINDOWS = []  # the live main window; a rebuilt one replaces the old here
+
+
+def rebuild_window(old, key):
+    """Close ``old`` and open a new main window in theme ``key``, in the same process.
+
+    Every widget takes its colours when it's built, so the window is rebuilt rather
+    than recoloured. The old window closes first: it releases the video socket and
+    stops YOLO, and the new one reconnects and reloads the model. Per-PC settings
+    (ROIs, levelling, speed, output, model choice) come back from QSettings; the
+    camera view and full screen are carried over here.
+    """
+    app = QtWidgets.QApplication.instance()
+    fullscreen, view = old.isFullScreen(), old.view_mode
+    app.setQuitOnLastWindowClosed(False)
+    try:
+        old.close()
+        theme_module.select_theme(key)
+        configure_pyqtgraph()
+        apply_theme(app)
+        new = Studio(old.args)
+        new.showFullScreen() if fullscreen else new.showMaximized()
+        new.change_view(view)
+        _WINDOWS[:] = [new]
+        old.deleteLater()
+    finally:
+        app.setQuitOnLastWindowClosed(True)
+    return new
 
 
 def build_parser():
@@ -2126,6 +2192,8 @@ def build_parser():
                    help='Publish detections as JSON over UDP to HOST:PORT (e.g. 127.0.0.1:5600) '
                         'for a receiving program. Also switchable with the Output pill; '
                         'see docs/DETECTION_OUTPUT.md')
+    p.add_argument('--theme', default=None, choices=sorted(theme_module.THEMES),
+                   help='Colour theme for this run (default: the one chosen with the Theme button)')
     p.add_argument('--model-cache', default=None,
                    help='Folder for downloaded models (default %%LOCALAPPDATA%%\\StereoVisionStudio\\models)')
     p.add_argument('--yolo-conf', type=float, default=0.35)
@@ -2442,6 +2510,31 @@ def self_test():
     assert toggles == [False]
     output.set_target_error("'robot-pc' is not an IPv4 address")
     assert output.listener.property('state') == 'bad'
+    # Colour themes: picker cards for every theme; widgets build and draw in a light theme.
+    picker_t = ThemePopover()
+    assert set(picker_t.cards) == set(theme_module.THEMES)
+    chosen_theme = []
+    picker_t.theme_chosen.connect(chosen_theme.append)
+    picker_t.set_current('control-room')
+    assert picker_t.cards['control-room'].current and not picker_t.cards['nord'].current
+    for card_t in picker_t.cards.values():
+        assert not card_t.grab().isNull()
+    picker_t.cards['nord'].click()
+    picker_t.cards['control-room'].click()
+    assert chosen_theme == ['nord'], 'choosing the current theme does nothing'
+    try:
+        theme_module.select_theme('light-modern')
+        apply_theme(QtWidgets.QApplication.instance())
+        assert QtWidgets.QApplication.instance().property('stereoThemeApplied') == 'light-modern'
+        light_panel = CameraPanel('LEFT', COLORS['accent'])
+        light_panel.set_image(np.zeros((120, 160, 3), dtype=np.uint8))
+        light_panel.set_detections([Detection('LEFT', 'box', 0.9, (10.0, 10.0, 60.0, 60.0), 1)])
+        assert light_panel.box_labels[0].color.name().upper() == VIDEO_INK, 'labels on video keep dark ink'
+        assert not light_panel.grab().isNull()
+        assert not KpiCard('Average delay', 'test').grab().isNull()
+    finally:
+        theme_module.select_theme(theme_module.DEFAULT_THEME)
+        apply_theme(QtWidgets.QApplication.instance())
     # Object speed: the per-camera Speed button, labels, arrows and the scale tool.
     sp = CameraPanel('LEFT', '#70e4a6')
     sp.set_image(np.zeros((480, 640, 3), dtype=np.uint8))
@@ -2511,11 +2604,16 @@ def main():
         except ValueError as exc:
             p.error(f'--library-via: {exc}{env_note(p, "library_via", "STEREO_LIBRARY_VIA")}')
     app = QtWidgets.QApplication(sys.argv[:1])
+    if not args.self_test:
+        saved = theme_module.load_theme_setting(QtCore.QSettings('AIEngineering', 'StereoVisionStudio'))
+        theme_module.select_theme(args.theme or saved)
+        configure_pyqtgraph()
     apply_theme(app)
     if args.self_test:
         return self_test()
     studio = Studio(args)
     studio.showMaximized()
+    _WINDOWS[:] = [studio]
     return app.exec()
 
 

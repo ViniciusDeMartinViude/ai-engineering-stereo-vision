@@ -142,6 +142,10 @@ The pretrained model file may be downloaded by Ultralytics if not present; a cus
 
 This adds object detection only, **not** stereo matching, depth calculation or 3D object coordinates. To estimate height/depth, the cameras still require calibrated intrinsics, extrinsics and temporal pairing.
 
+## Colour themes
+
+The Qt client has ten colour themes: the original "Control Room" plus nine inspired by VS Code themes (Dark/Light Modern, Monokai, Dracula, One Dark Pro, Solarized Dark/Light, Nord, Dark High Contrast). Pick one with the palette button in the app bar (shortcut `T`). The choice is remembered per PC. See [Colour themes](docs/QT_CLIENT.md#colour-themes).
+
 ## Object speed per camera
 
 Each camera in the Qt client has a **Speed** button. It tracks the detected objects (Ultralytics ByteTrack, one tracker per camera) and shows each one's speed and direction, timed with the cameras' capture timestamps. Choose **Set scale…** in its menu to measure a known length on the belt, and speeds read mm/s. See [Object speed](docs/QT_CLIENT.md#object-speed).

@@ -108,6 +108,24 @@ def _level(p):
     p.restore()
 
 
+def _palette(p):
+    """Painter's palette: a rounded blob with a thumb hole and three paint dots."""
+    path = QtGui.QPainterPath()
+    path.moveTo(_P(8, 2))
+    path.cubicTo(_P(12.5, 2), _P(14.5, 5.2), _P(14.5, 8))
+    path.cubicTo(_P(14.5, 10.5), _P(12.4, 11.2), _P(11, 10.8))
+    path.cubicTo(_P(9.6, 10.4), _P(9, 11.6), _P(9.6, 12.6))
+    path.cubicTo(_P(10.3, 13.9), _P(9.3, 14.5), _P(8, 14.5))
+    path.cubicTo(_P(4.4, 14.5), _P(1.5, 11.6), _P(1.5, 8))
+    path.cubicTo(_P(1.5, 4.6), _P(4.3, 2), _P(8, 2))
+    p.drawPath(path)
+    p.save()
+    p.setBrush(p.pen().color())
+    for x, y in ((5, 6.2), (8.4, 4.8), (4.6, 9.8)):
+        p.drawEllipse(_P(x, y), 1.1, 1.1)
+    p.restore()
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -136,6 +154,7 @@ _PAINTERS = {
     "camera": _camera,
     "stack": _stack,
     "level": _level,
+    "palette": _palette,
     "logo": _logo,
 }
 
