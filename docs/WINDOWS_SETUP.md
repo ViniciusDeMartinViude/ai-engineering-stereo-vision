@@ -126,7 +126,7 @@ Watch for `Stereo negotiated MATCHED capture mode`, or the explicit warning when
 
 Both server and client now scale their **display** to the Windows monitor instead of forcing a 1280-pixel-wide preview. This leaves the original Full HD source frames and UDP binary timestamp encoding untouched.
 
-On the server: press `1` to view both cameras, `2` for a larger left-camera preview, `3` for a larger right-camera preview, `F` for fullscreen, `S` to save the original full-resolution composite, `Q` or Escape to exit.
+On the server: press `1` to view both cameras, `2` for a larger left-camera preview, `3` for a larger right-camera preview, `F` for fullscreen and `S` to save the original full-resolution composite. The server now opens the Qt **server console** (see [Server console](SERVER_CONSOLE.md)): close the window to stop, `Esc` returns to the maximized window and `D` opens the Stream tab. With `--preview opencv` the old window is used, where `Q` or Escape exits.
 
 On a student client: the same `1`/`2`/`3` and `F` keys switch local display modes. Text in the dashboard is rendered at its final display size, preventing small letters from being shrunk alongside the video. The client continues decoding timestamps from the full incoming frame before applying any display crop.
 

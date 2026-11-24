@@ -83,6 +83,13 @@ def _copy(p):
     p.drawPolyline([_P(3, 10.5), _P(2.5, 10.5), _P(2.5, 2.5), _P(9.5, 2.5), _P(9.5, 3.2)])
 
 
+def _camera(p):
+    """Still camera: snapshot."""
+    p.drawRoundedRect(QtCore.QRectF(1.5, 4.5, 13, 9), 2, 2)
+    p.drawPolyline([_P(5, 4.5), _P(6.2, 2.5), _P(9.8, 2.5), _P(11, 4.5)])
+    p.drawEllipse(_P(8, 9), 2.6, 2.6)
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -108,6 +115,7 @@ _PAINTERS = {
     "tag": _tag,
     "gauge": _gauge,
     "copy": _copy,
+    "camera": _camera,
     "logo": _logo,
 }
 

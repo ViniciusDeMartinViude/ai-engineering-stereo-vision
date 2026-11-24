@@ -44,7 +44,7 @@ from theme import (COLORS, THRESHOLDS, apply_theme, class_color, display_font,
 from status_limits import LimitsDialog, load_thresholds, save_thresholds
 from control_room_widgets import (
     AnalysisCard, StatusChip, TelemetryBar, KpiCard,
-    DiagnosticsPanel, LatencyChart, set_state,
+    DiagnosticsPanel, LatencyChart, DelayAxis, StateOverlay, set_state,
 )
 
 # pyqtgraph uses [row, column, channel] throughout this client.
@@ -63,51 +63,6 @@ def fmt_roi(roi):
         return 'Full frame'
     x1, y1, x2, y2 = roi
     return f'ROI {x2-x1} × {y2-y1}'
-
-
-class DelayAxis(pg.AxisItem):
-    """Graph axis: data stays in ms, labels switch between ms and s.
-
-    Disable SI prefixes here: pyqtgraph may otherwise label kiloms as 'kms'.
-    """
-    def __init__(self, orientation='left'):
-        super().__init__(orientation=orientation)
-        self.unit = 'ms'
-        self.enableAutoSIPrefix(False)
-        self.setLabel('Delay (ms)', color=COLORS['secondary'], size='10pt')
-
-    def update_for_range(self, low_ms, high_ms):
-        unit = 's' if max(abs(low_ms), abs(high_ms)) >= 1000.0 else 'ms'
-        if unit != self.unit:
-            self.unit = unit
-            self.setLabel(f'Delay ({unit})', color=COLORS['secondary'], size='10pt')
-            self.picture = None
-            self.update()
-
-    def tickSpacing(self, minVal, maxVal, size):
-        # One tick level, so every label uses the same format (no alternating
-        # '20' / '25.0'): the finest standard level whose labels stay at least
-        # ~40 px apart at the axis' current height.
-        levels = super().tickSpacing(minVal, maxVal, size)
-        span = abs(maxVal - minVal)
-        chosen = levels[:1]
-        for spacing, offset in levels:  # coarse to fine
-            if span and size * spacing / span >= 40:
-                chosen = [(spacing, offset)]
-        return chosen
-
-    def tickStrings(self, values, scale, spacing):
-        divisor = 1000.0 if self.unit == 's' else 1.0
-        step = abs(spacing / divisor)
-        if step >= 10:
-            decimals = 0
-        elif step >= 1:
-            decimals = 0 if all(float(v / divisor).is_integer() for v in values) else 1
-        elif step >= 0.1:
-            decimals = 2
-        else:
-            decimals = 3
-        return [f'{value / divisor:.{decimals}f}' for value in values]
 
 
 class DrawViewBox(pg.ViewBox):
@@ -186,43 +141,6 @@ class DrawViewBox(pg.ViewBox):
         # The built-in ViewBox zoom uses the pointer position as the anchor.
         # Image/YOLO/ROI coordinates are unchanged by view transformations.
         super().wheelEvent(event, axis)
-
-
-class StateOverlay(QtWidgets.QFrame):
-    """Centred card over the video for the waiting / stalled / no-signal states."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName('overlayCard')
-        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        row = QtWidgets.QHBoxLayout(self)
-        row.setContentsMargins(18, 14, 24, 14)
-        row.setSpacing(14)
-        self.mark = QtWidgets.QLabel('○')
-        self.mark.setObjectName('overlayMark')
-        self.mark.setFont(ui_font(26, QtGui.QFont.Weight.DemiBold))
-        text = QtWidgets.QVBoxLayout()
-        text.setSpacing(2)
-        self.title = QtWidgets.QLabel()
-        self.title.setObjectName('overlayTitle')
-        self.title.setFont(ui_font(16, QtGui.QFont.Weight.DemiBold))
-        self.subtitle = QtWidgets.QLabel()
-        self.subtitle.setObjectName('overlaySubtitle')
-        self.subtitle.setFont(ui_font(12))
-        text.addWidget(self.title)
-        text.addWidget(self.subtitle)
-        row.addWidget(self.mark)
-        row.addLayout(text)
-
-    def show_state(self, state, mark, title, subtitle):
-        if self.mark.text() != mark:
-            self.mark.setText(mark)
-        if self.title.text() != title:
-            self.title.setText(title)
-        if self.subtitle.text() != subtitle:
-            self.subtitle.setText(subtitle)
-        set_state(self.mark, state)
-        if not self.isVisibleTo(self.parentWidget()):
-            self.show()
 
 
 class CameraPanel(QtWidgets.QFrame):
