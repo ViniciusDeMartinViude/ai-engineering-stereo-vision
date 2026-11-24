@@ -142,6 +142,10 @@ The pretrained model file may be downloaded by Ultralytics if not present; a cus
 
 This adds object detection only, **not** stereo matching, depth calculation or 3D object coordinates. To estimate height/depth, the cameras still require calibrated intrinsics, extrinsics and temporal pairing.
 
+## Sending detections to another program (robot backend)
+
+The Qt client can publish both cameras' detections as one JSON message per processed frame over UDP, with each frame's capture time, for a student backend that tracks objects and commands a robot. Switch it on with the **Output** pill (or `--publish 127.0.0.1:5600`). The pill shows the send rate, ripples on each message and warns when nothing is listening. Students can start from `tools/receive_detections.py`. See [Detection output](docs/DETECTION_OUTPUT.md) for the message format.
+
 ## Levelling cameras that aren't square to the conveyor
 
 In the Qt client, click a camera's **Level** button and drag a line along the conveyor. That camera's image then turns so the belt runs straight, for display, ROIs and YOLO alike. The angle is remembered per PC, and **×** undoes it. See [Levelling the cameras](docs/QT_CLIENT.md#levelling-the-cameras).

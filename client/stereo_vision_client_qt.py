@@ -35,6 +35,9 @@ from lan_ntp import measure_ntp_offset
 from model_library import DownloadJob, LibraryClient, LibraryError, format_size
 from model_picker import ModelPopover
 from loupe import Loupe, loupe_zoom
+from detection_output import (DEFAULT_TARGET, DetectionPublisher, detection_message, parse_target,
+                              status_message)
+from output_panel import OutputChip, OutputPopover, output_pill
 from camera_level import (format_angle, level_stereo_frame, line_correction, load_angles,
                           normalize_angle, save_angle)
 from seven_segment import SevenSegmentDisplay, format_three_digits
@@ -782,6 +785,15 @@ class Studio(QtWidgets.QMainWindow):
             max_workers=1, thread_name_prefix='model-library')
         self.model_popover = None
         self._button_text = True
+        # Detection output: JSON over UDP for a receiving program (e.g. the robot backend).
+        saved_target = str(self._preferences.value('output/target', DEFAULT_TARGET) or DEFAULT_TARGET)
+        enabled = bool(args.publish) or self._preferences.value('output/enabled', False, type=bool)
+        try:
+            self.publisher = DetectionPublisher(args.publish or saved_target, enabled)
+        except ValueError:
+            self.publisher = DetectionPublisher(DEFAULT_TARGET, enabled)
+        self._output_sent_seen = 0
+        self.output_popover = None
         if args.model_library:
             self.library = LibraryClient(args.model_library, cache_dir=args.model_cache,
                                          source_ip=args.library_via)
@@ -855,6 +867,10 @@ class Studio(QtWidgets.QMainWindow):
             chip.set_clickable(True)
             chip.clicked.connect(lambda: self.analysis.show_tab('diagnostics'))
             row.addWidget(chip)
+        self.output_chip = OutputChip('Output', min_width=150)
+        self.output_chip.set_clickable(True)
+        self.output_chip.clicked.connect(self._toggle_output_popover)
+        row.addWidget(self.output_chip)
         row.addStretch()
         self.model_button = QtWidgets.QPushButton('Model')
         self.model_button.setIcon(icon('stack', COLORS['secondary']))
@@ -966,6 +982,7 @@ class Studio(QtWidgets.QMainWindow):
         self.health_timer.timeout.connect(self._poll_clock_sync)
         self.health_timer.timeout.connect(self._refresh_metrics)
         self.health_timer.timeout.connect(self._poll_library)
+        self.health_timer.timeout.connect(self._poll_output)
         self.health_timer.start(100)
 
     def _set_image_button_active(self, active):
@@ -993,7 +1010,7 @@ class Studio(QtWidgets.QMainWindow):
         if first_show:
             self._place_under(self.image_dialog, self.image_button)
 
-    def _place_under(self, popup, button):
+    def _place_under(self, popup, button, align='right'):
         """Open a floating panel under its button, kept fully inside window and screen."""
         popup.adjustSize()
         size = popup.size()
@@ -1002,6 +1019,8 @@ class Studio(QtWidgets.QMainWindow):
         screen = self.screen()
         if screen is not None:
             bounds = bounds.intersected(screen.availableGeometry())
+        if align == 'left':
+            anchor.setX(anchor.x() - button.width() + size.width() - 32)
         x = min(anchor.x() - size.width() + 16, bounds.right() - size.width())
         y = min(anchor.y() - 10, bounds.bottom() - size.height())
         popup.move(max(bounds.left(), x), max(bounds.top(), y))
@@ -1487,8 +1506,13 @@ class Studio(QtWidgets.QMainWindow):
         shape_before = self.left_panel.native_shape
         self.left_panel.set_image(left_view)
         self.right_panel.set_image(right_view)
+        stamp, err = decode_strip(frame)
         if self.yolo:
-            self.yolo.submit(adjusted_frame, frame_id)
+            meta = {'stamp': stamp, 'recv_ns': recv_ns,
+                    'sizes': {'LEFT': left_view.shape[1::-1], 'RIGHT': right_view.shape[1::-1]},
+                    'angles': dict(self.level_angles),
+                    'rois': {'LEFT': self.left_panel.bounds, 'RIGHT': self.right_panel.bounds}}
+            self.yolo.submit(adjusted_frame, frame_id, meta)
             detections, status, result_id, result_mono, ms, error = self.yolo.snapshot()
             self.last_yolo_status = status
             self.last_yolo_ms = ms
@@ -1498,7 +1522,6 @@ class Studio(QtWidgets.QMainWindow):
             self.last_detection_count = len(detections)
             self.left_panel.set_detections(detections)
             self.right_panel.set_detections(detections)
-        stamp, err = decode_strip(frame)
         diagnostics_open = self.diagnostics.contents.isVisible()
         if stamp is not None:
             self.valid += 1
@@ -1727,7 +1750,8 @@ class Studio(QtWidgets.QMainWindow):
         if self.yolo:
             self.yolo.stop()
         a = self.args
-        self.yolo = YoloWorker(str(path), a.yolo_conf, a.yolo_imgsz, a.yolo_device)
+        self.yolo = YoloWorker(str(path), a.yolo_conf, a.yolo_imgsz, a.yolo_device,
+                               on_result=self._on_yolo_result)
         for panel in (self.left_panel, self.right_panel):
             if panel.bounds is not None:
                 self.yolo.set_roi(panel.side, panel.bounds)
@@ -1762,6 +1786,70 @@ class Studio(QtWidgets.QMainWindow):
         self._update_detection_ui()
         self._render_model_popover()
 
+    # ---- Detection output (JSON over UDP) --------------------------------------
+    def _clock_synced(self):
+        return self.last_clock_sync_mono is not None and not self.args.no_time_sync
+
+    def _on_yolo_result(self, detections, frame_id, meta, inference_ms):
+        """YOLO worker thread: publish this frame's detections at once (UDP never blocks)."""
+        if meta is None or not self.publisher.enabled or self._closing:
+            return
+        self.publisher.publish(detection_message(
+            self.publisher.source, meta, detections, inference_ms, self._model_short_name(),
+            self.clock_offset, self._clock_synced()))
+
+    def _detection_state(self):
+        if not self.yolo:
+            return 'off'
+        return {YoloState.LOADING: 'loading', YoloState.ERROR: 'error'}.get(self.yolo.state, 'running')
+
+    def _poll_output(self):
+        """10 Hz: heartbeat when idle, the pill and its send-activity ripple, the open panel."""
+        now = time.monotonic()
+        if self.publisher.heartbeat_due(now):
+            live = (self.last_frame_monotonic is not None
+                    and now - self.last_frame_monotonic < self.thresholds.stale_after_s)
+            self.publisher.publish(status_message(
+                self.publisher.source, self._detection_state(), live, self._model_short_name(),
+                self.clock_offset, self._clock_synced()))
+        status = self.publisher.status(now)
+        state, message, detail = output_pill(status)
+        self.output_chip.display(state, message, detail)
+        if status['sent'] != self._output_sent_seen:
+            self._output_sent_seen = status['sent']
+            self.output_chip.notify_sent()
+        if self.output_popover is not None and self.output_popover.isVisible():
+            self.output_popover.show_status(status)
+
+    def _toggle_output_popover(self):
+        if self.output_popover is None:
+            self.output_popover = OutputPopover(self)
+            self.output_popover.enabled_changed.connect(self._set_output_enabled)
+            self.output_popover.target_changed.connect(self._set_output_target)
+        if self.output_popover.isVisible():
+            self.output_popover.close()
+            return
+        self.output_popover.show_status(self.publisher.status())
+        self._place_under(self.output_popover, self.output_chip, align='left')
+        self.output_popover.show()
+
+    def _set_output_enabled(self, enabled):
+        self.publisher.set_enabled(enabled)
+        self._preferences.setValue('output/enabled', bool(enabled))
+        self._poll_output()
+
+    def _set_output_target(self, text):
+        try:
+            self.publisher.set_target(text)
+        except ValueError as exc:
+            if self.output_popover is not None:
+                self.output_popover.set_target_error(str(exc))
+            return
+        self._preferences.setValue('output/target', self.publisher.target)
+        if self.output_popover is not None:
+            self.output_popover.set_target_error('')
+        self._poll_output()
+
     def closeEvent(self, event):
         self._closing = True
         if hasattr(self, 'timer'):
@@ -1778,8 +1866,11 @@ class Studio(QtWidgets.QMainWindow):
             self.download_job.cancel.set()
         if self.model_popover is not None:
             self.model_popover.close()
+        if self.output_popover is not None:
+            self.output_popover.close()
         if self.yolo:
             self.yolo.stop()
+        self.publisher.close()
         if self.reader:
             self.reader.stop()
         super().closeEvent(event)
@@ -1807,6 +1898,10 @@ def build_parser():
                    help="This PC's IP on the network to download models over (e.g. its Wi-Fi IP). "
                         'Needed when two adapters share one subnet. '
                         'Default: the STEREO_LIBRARY_VIA environment variable.')
+    p.add_argument('--publish', default=None, metavar='HOST:PORT',
+                   help='Publish detections as JSON over UDP to HOST:PORT (e.g. 127.0.0.1:5600) '
+                        'for a receiving program. Also switchable with the Output pill; '
+                        'see docs/DETECTION_OUTPUT.md')
     p.add_argument('--model-cache', default=None,
                    help='Folder for downloaded models (default %%LOCALAPPDATA%%\\StereoVisionStudio\\models)')
     p.add_argument('--yolo-conf', type=float, default=0.35)
@@ -2080,6 +2175,34 @@ def self_test():
         'two names for one file stay two rows'
     picker.set_message('✕ Cannot reach the model library', 'bad')
     assert picker.message.isVisibleTo(picker)
+    # Detection output: pill states, the send-activity ripple and the live message panel.
+    base = {'enabled': True, 'target': '127.0.0.1:5600', 'source': 'PC', 'sent': 12, 'bytes': 9000,
+            'errors': 0, 'last_error': None, 'rate': 9.8, 'since_last': 0.05, 'since_detection': 0.05,
+            'no_listener': False, 'local': True, 'last_type': 'detections',
+            'last_message': '{"v":1,"type":"detections","seq":7}'}
+    assert output_pill(dict(base, enabled=False))[:2] == ('neutral', 'Off')
+    assert output_pill(base)[:2] == ('good', '9.8 msg/s')
+    assert output_pill(dict(base, no_listener=True))[:2] == ('warning', 'No listener')
+    assert output_pill(dict(base, since_detection=None))[:2] == ('info', 'Status only')
+    assert output_pill(dict(base, since_last=None, errors=1, last_error='OSError'))[:2] == ('bad', 'Send failed')
+    chip = OutputChip('Output')
+    assert chip.pulse == 0.0
+    chip.notify_sent()
+    assert chip.pulse > 0.9 and chip._timer.isActive()
+    output = OutputPopover()
+    toggles = []
+    output.enabled_changed.connect(toggles.append)
+    output.show_status(base)
+    assert output.switch.isChecked() and toggles == [], 'showing state does not echo a toggle'
+    assert output.target.text() == '127.0.0.1:5600' and '"seq": 7' in output.view.toPlainText()
+    assert output.listener.property('state') == 'good'
+    output.pause_button.setChecked(True)
+    output.show_status(dict(base, last_message='{"v":1,"type":"detections","seq":8}'))
+    assert '"seq": 7' in output.view.toPlainText(), 'paused view holds the message'
+    output.switch.setChecked(False)
+    assert toggles == [False]
+    output.set_target_error("'robot-pc' is not an IPv4 address")
+    assert output.listener.property('state') == 'bad'
     print('PASS: Qt control-room, ROI, timing, image adjustments, detection labels, '
           'status limits, detections table and model picker')
     return 0
@@ -2099,6 +2222,11 @@ def main():
         p.error('YOLO confidence must be in (0,1]')
     if args.yolo_model and args.yolo_model.lower().startswith('library:') and not args.model_library:
         p.error('--yolo-model library:NAME needs --model-library http://SERVER_IP:8765')
+    if args.publish:
+        try:
+            parse_target(args.publish)
+        except ValueError as exc:
+            p.error(f'--publish: {exc}')
     if args.model_library:
         try:
             LibraryClient(args.model_library)

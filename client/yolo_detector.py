@@ -37,8 +37,11 @@ class Detection:
 
 
 class YoloWorker:
-    def __init__(self, weights, confidence=0.35, imgsz=640, device=None):
+    def __init__(self, weights, confidence=0.35, imgsz=640, device=None, on_result=None):
         self.weights = weights
+        # Called on the worker thread as on_result(detections, frame_id, meta, inference_ms)
+        # right after each frame is processed (used to publish detections at once).
+        self.on_result = on_result
         self.confidence = float(confidence)
         self.imgsz = int(imgsz)
         self.device = device
@@ -74,13 +77,13 @@ class YoloWorker:
             self.result_mono = 0.0
             self.pending = None
 
-    def submit(self, frame, frame_id):
-        """Submit the latest *original* stereo frame; no copy unless idle."""
+    def submit(self, frame, frame_id, meta=None):
+        """Submit the latest stereo frame; ``meta`` travels with it to ``on_result``."""
         with self.condition:
             if self.stop_event or self.state is YoloState.ERROR:
                 return
             # Replacing pending work avoids an unbounded backlog.
-            self.pending = (frame, frame_id, dict(self.rois), self.roi_version)
+            self.pending = (frame, frame_id, dict(self.rois), self.roi_version, meta)
             self.condition.notify()
 
     def snapshot(self):
@@ -119,7 +122,7 @@ class YoloWorker:
                     self.condition.wait(timeout=0.5)
                 if self.stop_event:
                     break
-                frame, fid, active_rois, version = self.pending
+                frame, fid, active_rois, version, meta = self.pending
                 self.pending = None
             try:
                 found, inference_ms = self._infer(model, frame, active_rois)
@@ -147,6 +150,11 @@ class YoloWorker:
                                f"(L={sum(d.side == 'LEFT' for d in found)}, "
                                f"R={sum(d.side == 'RIGHT' for d in found)}) "
                                f"{inference_ms:.0f}ms")
+            if self.on_result is not None:
+                try:
+                    self.on_result(tuple(found), fid, meta, inference_ms)
+                except Exception:  # a consumer's failure must never stop detection
+                    pass
 
     def _infer(self, model, frame, active_rois):
         # The metadata footer never enters the model.
