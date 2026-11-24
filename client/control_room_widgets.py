@@ -166,7 +166,7 @@ class ToggleSwitch(QtWidgets.QCheckBox):
         p.drawRoundedRect(track, 10, 10)
         knob_x = track.right() - 17 if on else track.left() + 3
         p.setPen(QtCore.Qt.PenStyle.NoPen)
-        p.setBrush(QtGui.QColor(COLORS["background"] if on else
+        p.setBrush(QtGui.QColor(COLORS["on_accent"] if on else
                                 (COLORS["secondary"] if enabled else COLORS["border_strong"])))
         p.drawEllipse(QtCore.QRectF(knob_x, track.top() + 3, 14, 14))
         p.setPen(QtGui.QColor(COLORS["text"] if enabled else COLORS["muted"]))
@@ -582,9 +582,9 @@ def _fade_brush(color, top_alpha=70):
 class LatencyChart(QtWidgets.QWidget):
     """Delay/skew history: raw samples, mean, provisional threshold bands, hover readout."""
     MODES = {
-        'delay': {'color': COLORS['accent'], 'axis': 'Delay',
+        'delay': {'color': 'accent', 'axis': 'Delay',  # theme tokens, looked up when drawn
                   'mean': 'mean {value:.0f} ms', 'value': '{:.1f} ms'},
-        'skew': {'color': COLORS['skew'], 'axis': 'Skew',
+        'skew': {'color': 'skew', 'axis': 'Skew',
                  'mean': 'mean {value:+.1f} ms', 'value': '{:+.2f} ms'},
     }
 
@@ -694,9 +694,10 @@ class LatencyChart(QtWidgets.QWidget):
     def set_mode(self, mode):
         self.mode = mode
         spec = self.MODES[mode]
-        self.line.setPen(pg.mkPen(spec['color'], width=2))
-        self.line.setBrush(_fade_brush(spec['color']))
-        self.marker.setBrush(pg.mkBrush(spec['color']))
+        color = COLORS.get(spec['color'], spec['color'])
+        self.line.setPen(pg.mkPen(color, width=2))
+        self.line.setBrush(_fade_brush(color))
+        self.marker.setBrush(pg.mkBrush(color))
         self.mean_line.label.setFormat(spec['mean'])
         self.high_envelope = self.INITIAL_DELAY_TOP if mode == 'delay' else 30.0
         self._display_count = 0

@@ -71,7 +71,8 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         self.title = title
         self.show_title = show_title
         self.color = QtGui.QColor(color)
-        self.unit_color = QtGui.QColor('#A3B3C6')
+        from theme import COLORS
+        self.unit_color = QtGui.QColor(COLORS['secondary'])
         self.digits = '---'
         self.decimal = None
         self.sign = ''
@@ -97,7 +98,7 @@ class SevenSegmentDisplay(QtWidgets.QFrame):
         bounds = self.rect()
         top = 4
         if self.show_title:
-            p.setPen(QtGui.QColor('#A3B3C6'))
+            p.setPen(self.unit_color)
             p.setFont(QtGui.QFont('Segoe UI', 10, QtGui.QFont.Weight.DemiBold))
             p.drawText(QtCore.QRectF(7, 3, bounds.width()-14, 22),
                        QtCore.Qt.AlignmentFlag.AlignLeft, self.title)

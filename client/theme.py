@@ -24,6 +24,7 @@ COLORS = {
     "secondary": "#A3B3C6",
     "muted": "#8293A8",
     "accent": "#4CC2FF",
+    "on_accent": "#0B1016",
     "good": "#3DD68C",
     "warning": "#F5B83D",
     "bad": "#FF6B6B",
@@ -41,6 +42,159 @@ STATE_WORDS = {"good": "OK", "warning": "Watch", "bad": "High", "info": "Info",
                "neutral": "No data", "stale": "Stale"}
 # Detection classes: high contrast against the green belt and dark UI.
 CLASS_COLORS = ("#FFB547", "#FF6FB5", "#A98BFF", "#4FD8F0", "#FF8A5B", "#F2F5F8")
+
+# Things drawn ON the camera image keep these colours in every theme: they must
+# read on video, not on the UI. Ink is the text on bright fills (box labels, ROI tag).
+VIDEO_INK = "#0B1016"
+VIDEO_OVERLAY = {"background": "rgba(11, 16, 22, 215)", "hint": "rgba(11, 16, 22, 190)",
+                 "border": "#34465C", "text": "#E6EDF5", "secondary": "#A3B3C6",
+                 "neutral": "#8A9AAD", "warning": "#F5B83D", "bad": "#FF6B6B", "info": "#4CC2FF"}
+
+# ---- Colour themes ------------------------------------------------------------
+# Each theme sets every UI token above except "roi" (drawn on video). The palettes
+# are inspired by popular VS Code colour themes, adjusted so that text, state and
+# accent colours keep WCAG AA contrast on the surfaces they're used on
+# (tests/test_themes.py checks every theme).
+THEME_TOKENS = ("background", "surface", "raised", "hover", "border", "border_strong", "text",
+                "secondary", "muted", "accent", "on_accent", "good", "warning", "bad", "info",
+                "neutral", "video", "skew")
+DEFAULT_THEME = "control-room"
+THEMES = {
+    "control-room": {
+        "name": "Control Room", "inspired": "The client's original dark theme", "dark": True,
+        "colors": {k: COLORS[k] for k in THEME_TOKENS},
+    },
+    "dark-modern": {
+        "name": "Dark Modern", "inspired": "Inspired by VS Code's default dark theme", "dark": True,
+        "colors": {"background": "#1F1F1F", "surface": "#181818", "raised": "#262626",
+                   "hover": "#313131", "border": "#2B2B2B", "border_strong": "#454545",
+                   "text": "#CCCCCC", "secondary": "#A8A8A8", "muted": "#8F8F8F",
+                   "accent": "#4DAAFC", "on_accent": "#181818", "good": "#89D185",
+                   "warning": "#CCA700", "bad": "#F48771", "info": "#75BEFF",
+                   "neutral": "#8F8F8F", "video": "#111111", "skew": "#C586C0"},
+    },
+    "light-modern": {
+        "name": "Light Modern", "inspired": "Inspired by VS Code's default light theme", "dark": False,
+        "colors": {"background": "#F8F8F8", "surface": "#FFFFFF", "raised": "#F3F3F3",
+                   "hover": "#E8E8E8", "border": "#E5E5E5", "border_strong": "#C8C8C8",
+                   "text": "#3B3B3B", "secondary": "#5F5F5F", "muted": "#6B6B6B",
+                   "accent": "#005FB8", "on_accent": "#FFFFFF", "good": "#1E7A36",
+                   "warning": "#8A6100", "bad": "#C42B1C", "info": "#1A64B4",
+                   "neutral": "#6B6B6B", "video": "#DADADA", "skew": "#8250DF"},
+    },
+    "monokai": {
+        "name": "Monokai", "inspired": "Inspired by the Monokai theme", "dark": True,
+        "colors": {"background": "#272822", "surface": "#1E1F1C", "raised": "#34352F",
+                   "hover": "#3E3D32", "border": "#3B3C35", "border_strong": "#5B5C52",
+                   "text": "#F8F8F2", "secondary": "#CFCFC2", "muted": "#A59F85",
+                   "accent": "#66D9EF", "on_accent": "#1E1F1C", "good": "#A6E22E",
+                   "warning": "#E6DB74", "bad": "#FF4F8B", "info": "#66D9EF",
+                   "neutral": "#A59F85", "video": "#161713", "skew": "#AE81FF"},
+    },
+    "dracula": {
+        "name": "Dracula", "inspired": "Inspired by the Dracula theme", "dark": True,
+        "colors": {"background": "#282A36", "surface": "#21222C", "raised": "#343746",
+                   "hover": "#44475A", "border": "#3A3D4D", "border_strong": "#5A5D74",
+                   "text": "#F8F8F2", "secondary": "#C3C6DB", "muted": "#9EA6CC",
+                   "accent": "#BD93F9", "on_accent": "#21222C", "good": "#50FA7B",
+                   "warning": "#F1FA8C", "bad": "#FF6E6E", "info": "#8BE9FD",
+                   "neutral": "#9EA6CC", "video": "#191A21", "skew": "#FF79C6"},
+    },
+    "one-dark": {
+        "name": "One Dark Pro", "inspired": "Inspired by the One Dark Pro theme", "dark": True,
+        "colors": {"background": "#282C34", "surface": "#21252B", "raised": "#2C313A",
+                   "hover": "#353B45", "border": "#3A404B", "border_strong": "#4B5263",
+                   "text": "#C8CCD4", "secondary": "#ABB2BF", "muted": "#9199A6",
+                   "accent": "#61AFEF", "on_accent": "#21252B", "good": "#98C379",
+                   "warning": "#E5C07B", "bad": "#E77B84", "info": "#56B6C2",
+                   "neutral": "#9199A6", "video": "#1B1F24", "skew": "#C678DD"},
+    },
+    "solarized-dark": {
+        "name": "Solarized Dark", "inspired": "Inspired by the Solarized Dark theme", "dark": True,
+        "colors": {"background": "#002B36", "surface": "#00212B", "raised": "#073642",
+                   "hover": "#0B4250", "border": "#0E4553", "border_strong": "#2A5E6B",
+                   "text": "#A2AFAF", "secondary": "#93A1A1", "muted": "#869799",
+                   "accent": "#3FA1E6", "on_accent": "#00212B", "good": "#9DB300",
+                   "warning": "#CC9B00", "bad": "#F2554F", "info": "#2DB3A9",
+                   "neutral": "#869799", "video": "#001A21", "skew": "#8C90D8"},
+    },
+    "solarized-light": {
+        "name": "Solarized Light", "inspired": "Inspired by the Solarized Light theme", "dark": False,
+        "colors": {"background": "#EEE8D5", "surface": "#FDF6E3", "raised": "#F5EEDA",
+                   "hover": "#E9E2CC", "border": "#DDD6C1", "border_strong": "#C2BAA2",
+                   "text": "#073642", "secondary": "#4C6168", "muted": "#566A70",
+                   "accent": "#1A6AA6", "on_accent": "#FDF6E3", "good": "#5A6B00",
+                   "warning": "#7E5D00", "bad": "#B8271F", "info": "#1A7A74",
+                   "neutral": "#566A70", "video": "#E2DAC3", "skew": "#5B5FAF"},
+    },
+    "nord": {
+        "name": "Nord", "inspired": "Inspired by the Nord theme", "dark": True,
+        "colors": {"background": "#2E3440", "surface": "#3B4252", "raised": "#434C5E",
+                   "hover": "#4C566A", "border": "#4C566A", "border_strong": "#616E88",
+                   "text": "#ECEFF4", "secondary": "#D8DEE9", "muted": "#B9C2D0",
+                   "accent": "#88C0D0", "on_accent": "#2E3440", "good": "#A3BE8C",
+                   "warning": "#EBCB8B", "bad": "#F09AA0", "info": "#8FBCBB",
+                   "neutral": "#B9C2D0", "video": "#242933", "skew": "#C9A3C3"},
+    },
+    "high-contrast": {
+        "name": "Dark High Contrast", "inspired": "Inspired by VS Code's Dark High Contrast theme",
+        "dark": True,
+        "colors": {"background": "#000000", "surface": "#000000", "raised": "#0E0E0E",
+                   "hover": "#1C1C1C", "border": "#6FC3DF", "border_strong": "#6FC3DF",
+                   "text": "#FFFFFF", "secondary": "#E6E6E6", "muted": "#CFCFCF",
+                   "accent": "#F38518", "on_accent": "#000000", "good": "#89D185",
+                   "warning": "#FFD54F", "bad": "#FF8F7A", "info": "#75BEFF",
+                   "neutral": "#CFCFCF", "video": "#000000", "skew": "#E78BE7"},
+    },
+}
+CURRENT_THEME = DEFAULT_THEME
+
+
+def theme_id(value):
+    """A known theme id for ``value`` (an id or a display name), else the default."""
+    text = str(value or "").strip().lower()
+    for key, theme in THEMES.items():
+        if text in (key, theme["name"].lower()):
+            return key
+    return DEFAULT_THEME
+
+
+def select_theme(value):
+    """Make ``value`` the active theme. Updates COLORS and STATE_COLORS in place.
+
+    Widgets read these when they are built, so the window must be built (or
+    rebuilt) after this call. Returns the theme id actually selected.
+    """
+    global CURRENT_THEME
+    key = theme_id(value)
+    COLORS.update(THEMES[key]["colors"])
+    for state in ("good", "warning", "bad", "info", "neutral"):
+        STATE_COLORS[state] = COLORS[state]
+    STATE_COLORS["stale"] = COLORS["neutral"]
+    CURRENT_THEME = key
+    return key
+
+
+def load_theme_setting(qsettings):
+    return theme_id(qsettings.value("ui/theme", DEFAULT_THEME))
+
+
+def save_theme_setting(qsettings, key):
+    qsettings.setValue("ui/theme", theme_id(key))
+
+
+def mix(a, b, amount):
+    """Colour ``amount`` (0-1) of the way from ``a`` to ``b``, as #RRGGBB."""
+    ca, cb = QtGui.QColor(a), QtGui.QColor(b)
+    return QtGui.QColor(round(ca.red() + (cb.red() - ca.red()) * amount),
+                        round(ca.green() + (cb.green() - ca.green()) * amount),
+                        round(ca.blue() + (cb.blue() - ca.blue()) * amount)).name()
+
+
+def rgba(color, alpha):
+    c = QtGui.QColor(color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
+
 
 SPACING = (4, 8, 12, 16, 24)
 RADIUS = 8
@@ -118,7 +272,7 @@ def numeric_font(pixel_size=FONTS["body"], weight=QtGui.QFont.Weight.Normal):
 
 def apply_theme(app: QtWidgets.QApplication):
     """Install style, palette, font and QSS once per application."""
-    if app is None or app.property("stereoThemeApplied"):
+    if app is None or app.property("stereoThemeApplied") == CURRENT_THEME:
         return
     app.setStyle("Fusion")
     c = COLORS
@@ -128,7 +282,7 @@ def apply_theme(app: QtWidgets.QApplication):
                         (role.Base, c["surface"]), (role.AlternateBase, c["raised"]),
                         (role.Text, c["text"]), (role.Button, c["raised"]),
                         (role.ButtonText, c["text"]), (role.Highlight, c["accent"]),
-                        (role.HighlightedText, c["background"]), (role.ToolTipBase, c["raised"]),
+                        (role.HighlightedText, c["on_accent"]), (role.ToolTipBase, c["raised"]),
                         (role.ToolTipText, c["text"]), (role.PlaceholderText, c["muted"]),
                         (role.Link, c["accent"]), (role.BrightText, c["bad"])):
         palette.setColor(name, QtGui.QColor(value))
@@ -138,7 +292,7 @@ def apply_theme(app: QtWidgets.QApplication):
     app.setPalette(palette)
     app.setFont(ui_font())
     app.setStyleSheet(style_sheet())
-    app.setProperty("stereoThemeApplied", True)
+    app.setProperty("stereoThemeApplied", CURRENT_THEME)
 
 
 def style_sheet():
@@ -148,6 +302,12 @@ def style_sheet():
     only carry colour, borders and spacing.
     """
     c = COLORS
+    v = VIDEO_OVERLAY
+    dark = THEMES[CURRENT_THEME]["dark"]
+    accent_hover = mix(c['accent'], '#FFFFFF' if dark else '#000000', 0.25)
+    popover = rgba(c['surface'], 242)
+    table_alt = mix(c['surface'], c['raised'], 0.45)
+    modal_dim = rgba('#04070A', 150) if dark else rgba('#000000', 70)
     return f"""
     QMainWindow, QWidget#central {{ background-color:{c['background']}; }}
     QWidget {{ color:{c['text']}; }}
@@ -200,18 +360,18 @@ def style_sheet():
 
     /* Overlays drawn on top of video */
     QFrame#overlayCard {{
-        background-color:rgba(11, 16, 22, 215); border:1px solid {c['border_strong']};
+        background-color:{v['background']}; border:1px solid {v['border']};
         border-radius:12px;
     }}
-    QLabel#overlayTitle {{ color:{c['text']}; }}
-    QLabel#overlaySubtitle {{ color:{c['secondary']}; }}
-    QLabel#overlayMark {{ color:{c['neutral']}; }}
-    QLabel#overlayMark[state="warning"] {{ color:{c['warning']}; }}
-    QLabel#overlayMark[state="bad"] {{ color:{c['bad']}; }}
-    QLabel#overlayMark[state="info"] {{ color:{c['accent']}; }}
+    QLabel#overlayTitle {{ color:{v['text']}; }}
+    QLabel#overlaySubtitle {{ color:{v['secondary']}; }}
+    QLabel#overlayMark {{ color:{v['neutral']}; }}
+    QLabel#overlayMark[state="warning"] {{ color:{v['warning']}; }}
+    QLabel#overlayMark[state="bad"] {{ color:{v['bad']}; }}
+    QLabel#overlayMark[state="info"] {{ color:{v['info']}; }}
     QLabel#hint {{
-        color:{c['text']}; background-color:rgba(11, 16, 22, 190);
-        border:1px solid {c['border']}; border-radius:8px; padding:5px 10px;
+        color:{v['text']}; background-color:{v['hint']};
+        border:1px solid {v['border']}; border-radius:8px; padding:5px 10px;
     }}
 
     /* Buttons */
@@ -224,10 +384,10 @@ def style_sheet():
     QPushButton:focus {{ border-color:{c['accent']}; }}
     QPushButton[active="true"] {{ color:{c['accent']}; border-color:{c['accent']}; }}
     QPushButton#primary {{
-        background-color:{c['accent']}; color:{c['background']}; border-color:{c['accent']};
+        background-color:{c['accent']}; color:{c['on_accent']}; border-color:{c['accent']};
         font-weight:600;
     }}
-    QPushButton#primary:hover {{ background-color:#7AD3FF; }}
+    QPushButton#primary:hover {{ background-color:{accent_hover}; }}
     QPushButton#flat {{ background:transparent; border-color:transparent; color:{c['secondary']}; }}
     QPushButton#flat:hover {{ color:{c['text']}; background-color:{c['raised']}; }}
     QPushButton:disabled {{ color:{c['muted']}; }}
@@ -257,7 +417,7 @@ def style_sheet():
         background:{c['text']}; border:2px solid {c['accent']};
         width:12px; height:12px; margin:-6px 0; border-radius:8px;
     }}
-    QSlider::handle:horizontal:hover {{ background:#FFFFFF; }}
+    QSlider::handle:horizontal:hover {{ background:{c['surface']}; }}
     QSlider#temperatureSlider::groove:horizontal {{
         background:qlineargradient(x1:0, y1:0, x2:1, y2:0,
             stop:0 #5AA9FF, stop:0.5 {c['border_strong']}, stop:1 #FFB547);
@@ -270,7 +430,7 @@ def style_sheet():
     /* Floating image adjustment panel */
     QDialog {{ background-color:transparent; }}
     QFrame#imageAdjustmentsPanel, QFrame#popoverCard {{
-        background-color:rgba(18, 26, 35, 242);
+        background-color:{popover};
         border:1px solid {c['border_strong']}; border-radius:12px;
     }}
     QFrame#imageAdjustmentsPanel QLabel, QFrame#imageAdjustmentsPanel QCheckBox,
@@ -292,13 +452,13 @@ def style_sheet():
     QAbstractSpinBox {{
         background-color:{c['background']}; color:{c['text']};
         border:1px solid {c['border_strong']}; border-radius:6px; padding:4px 6px;
-        selection-background-color:{c['accent']}; selection-color:{c['background']};
+        selection-background-color:{c['accent']}; selection-color:{c['on_accent']};
     }}
     QAbstractSpinBox:focus {{ border-color:{c['accent']}; }}
 
     /* Detections table */
     QTableView {{
-        background-color:{c['surface']}; alternate-background-color:#151E29;
+        background-color:{c['surface']}; alternate-background-color:{table_alt};
         border:0px; gridline-color:{c['border']}; color:{c['text']};
         selection-background-color:{c['hover']}; selection-color:{c['text']};
     }}
@@ -311,7 +471,7 @@ def style_sheet():
     QTableCornerButton::section {{ background-color:{c['raised']}; border:0px; }}
 
     /* Backdrop behind modal dialogs */
-    QWidget#modalDim {{ background-color:rgba(4, 7, 10, 150); }}
+    QWidget#modalDim {{ background-color:{modal_dim}; }}
 
     QSplitter::handle {{ background:transparent; }}
     QSplitter::handle:hover {{ background-color:{c['border']}; }}
