@@ -18,6 +18,9 @@ To launch:
   python server/stereo_vision_server_multiclient.py --transport unicast --clients-file clients.txt
   python server/stereo_vision_server_multiclient.py --self-test
 
+The server also hosts the YOLO model library (models/ folder, read-only HTTP on
+TCP 8765) that clients download trained models from; see docs/MODEL_LIBRARY.md.
+
 Dependencies: pygobject, GStreamer, opencv, numpy; PySide6 + pyqtgraph for the console.
 """
 import argparse
@@ -33,6 +36,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 from lan_ntp import LanNtpServer  # noqa: E402
+from model_library import (  # noqa: E402
+    DEFAULT_PORT as LIBRARY_PORT, DEFAULT_RATE_MBPS, LibraryStore, ModelLibraryServer,
+)
 from stamp_protocol import FOOTER_H, STRIP_WIDTH, encode_strip, extract_strip  # noqa: E402
 
 import cv2  # noqa: E402
@@ -811,6 +817,16 @@ def build_parser():
                         help="LAN SNTP port (default 9123; 123 can conflict with Windows Time)")
     parser.add_argument("--no-ntp", action="store_true",
                         help="Disable LAN SNTP clock service")
+    parser.add_argument("--model-library", default=str(Path(__file__).resolve().parents[1] / 'models'),
+                        help="Folder of trained YOLO models served to the clients (default: models/)")
+    parser.add_argument("--library-host", default="0.0.0.0",
+                        help="Address the model library listens on (default: every network of this PC)")
+    parser.add_argument("--library-port", type=int, default=LIBRARY_PORT,
+                        help=f"TCP port of the model library (default {LIBRARY_PORT})")
+    parser.add_argument("--library-rate-mbps", type=float, default=DEFAULT_RATE_MBPS,
+                        help="Total download speed cap in Mbit/s so model downloads never starve the "
+                             f"video stream (default {DEFAULT_RATE_MBPS:g}; 0 = no cap)")
+    parser.add_argument("--no-library", action="store_true", help="Do not serve the model library")
     parser.add_argument("--no-preview", action="store_true",
                         help="Run headless: no window, console log only (Ctrl+C to stop)")
     parser.add_argument("--preview", choices=['qt', 'opencv'], default='qt',
@@ -874,10 +890,19 @@ def main():
             view = 'opencv'
 
     engine = ServerEngine(args, destinations, fixed_clients)
+    library = None
+    if not args.no_library:
+        library = ModelLibraryServer(LibraryStore(args.model_library), args.library_host,
+                                     args.library_port, args.library_rate_mbps, log=engine.log)
+        try:
+            library.start()
+        except OSError as exc:
+            engine.log(f'WARNING: model library unavailable on TCP {args.library_port}: {exc}. '
+                       'Use --library-port or --no-library.')
     engine.start()
     try:
         if view == 'qt':
-            run_console(engine, args)
+            run_console(engine, args, library)
         elif view == 'opencv':
             run_opencv_preview(engine, args)
         else:
@@ -886,6 +911,8 @@ def main():
         print("Interrupted")
     finally:
         engine.stop()
+        if library is not None:
+            library.stop()
         print("Stopped")
     if engine.phase == 'failed':
         raise SystemExit(1)

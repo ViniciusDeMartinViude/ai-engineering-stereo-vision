@@ -908,7 +908,7 @@ class DetectionsPanel(QtWidgets.QWidget):
         if self.paused:
             return
         if not self.enabled:
-            self._show_placeholder('Detection is off · start the client with --yolo-model')
+            self._show_placeholder('Detection is off · choose a YOLO model with the Model button')
             return
         if stale:
             self.table.setRowCount(0)

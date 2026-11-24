@@ -98,6 +98,17 @@ Both preview windows now open **maximized** on Windows (showing the taskbar). Pr
 
 **Interpretation:** The displayed video frame age is an estimate relative to the camera server's Windows clock. It can still include network asymmetry and timestamps taken after physical exposure. NTP correction cannot eliminate actual MPEG-TS/H.264 buffering, so an apparent three-second delay that persists after synchronization is a real pipeline-latency problem to investigate separately.
 
+## Model library: share trained YOLO models from the camera server
+
+Publish a trained model once on the camera PC and every client can pick it from the **Model** button (shortcut `M`). The client downloads it in the background, checks it and switches detection without restarting. The camera server serves the git-ignored `models/` folder read-only over HTTP (TCP 8765) with a download speed cap, so the video stream keeps its bandwidth.
+
+```powershell
+python tools/model_library.py add best.pt --name belt-v3
+python client/stereo_vision_client_qt.py --iface-ip CLIENT_IP --time-server SERVER_IP --model-library http://SERVER_WIFI_IP:8765 --library-via CLIENT_WIFI_IP
+```
+
+See [Model library](docs/MODEL_LIBRARY.md) for the two-network setup (download over Wi‑Fi until the VLAN switch arrives), the firewall and offline use.
+
 ## YOLO object detection on the student client
 
 The client can run **local Ultralytics YOLO object detection** on both stereo images, independently. This is optional: without \`--yolo-model\`, the existing multicast viewer works unchanged. It draws bounding boxes, class names and confidence percentages over the displayed images, along with an inference status/count. The model sees only the camera image regions (not the 100-pixel binary timestamp footer). Original H.264 packets and CRC16 timestamp are unchanged.

@@ -29,3 +29,6 @@ calibration.local.*
 Thumbs.db
 .vscode/
 .idea/
+
+# YOLO model library served by the camera server (models are not committed)
+models/

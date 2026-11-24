@@ -7,6 +7,8 @@ timestamp decoder, and optional YOLO worker as the Tkinter client.
 Install: python -m pip install PySide6 pyqtgraph
 Run: python client/stereo_vision_client_qt.py --iface-ip 192.168.0.11
 Optional YOLO: --yolo-model C:/models/best.pt --yolo-device 0
+Model library: --model-library http://SERVER_IP:8765 [--library-via THIS_PC_IP]
+  then choose a model with the Model button, or --yolo-model library:NAME
 """
 from __future__ import annotations
 
@@ -28,6 +30,8 @@ from receiver import StreamReceiver
 from stamp_protocol import decode_strip, iso_utc, split_stereo, video_height
 from yolo_detector import Detection, YoloState, YoloWorker
 from lan_ntp import measure_ntp_offset
+from model_library import DownloadJob, LibraryClient, LibraryError, format_size
+from model_picker import ModelPopover
 from seven_segment import SevenSegmentDisplay, format_three_digits
 from timing_filter import ExponentialSmoother
 from image_adjustments import (
@@ -590,6 +594,22 @@ class Studio(QtWidgets.QMainWindow):
         self.annotation_popover = None
         # Active OK / Watch / High limits; theme.THRESHOLDS holds only the defaults.
         self.thresholds = load_thresholds(self._preferences)
+        # YOLO model: a local file (--yolo-model PATH) or one from the server's library.
+        self.model_label = None      # what the YOLO worker runs (library name or file path)
+        self.model_entry = None      # ModelEntry when it came from the library
+        self.download_job = None
+        self.library = None
+        self.library_entries = []
+        self.library_error = None
+        self.library_offline = False
+        self._index_future = None
+        self._library_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='model-library')
+        self.model_popover = None
+        self._button_text = True
+        if args.model_library:
+            self.library = LibraryClient(args.model_library, cache_dir=args.model_cache,
+                                         source_ip=args.library_via)
         self.last_detections = ()
         # The raw, signed R-L skew remains unchanged in stats/logs.
         # The instrument uses a 1.5-second time-based EMA.
@@ -661,21 +681,19 @@ class Studio(QtWidgets.QMainWindow):
             chip.clicked.connect(lambda: self.analysis.show_tab('diagnostics'))
             row.addWidget(chip)
         row.addStretch()
+        self.model_button = QtWidgets.QPushButton('Model')
+        self.model_button.setIcon(icon('stack', COLORS['secondary']))
+        self.model_button.clicked.connect(self._toggle_model_popover)
+        row.addWidget(self.model_button)
         self.labels_button = QtWidgets.QPushButton('Labels')
         self.labels_button.setIcon(icon('tag', COLORS['secondary']))
         self.image_button = QtWidgets.QPushButton('Adjust image')
-        for button in (self.labels_button, self.image_button):
+        for button in (self.model_button, self.labels_button, self.image_button):
             button.setFont(ui_font(13, QtGui.QFont.Weight.DemiBold))
             button.setIconSize(QtCore.QSize(16, 16))
             button.setFixedHeight(32)
         self.labels_button.clicked.connect(self._toggle_annotation_popover)
         self.image_button.clicked.connect(self._toggle_image_dialog)
-        if self.args.yolo_model:
-            self.labels_button.setToolTip('What detection labels show: class, ID, confidence, '
-                                          'centre, size · shortcut L cycles presets')
-        else:
-            self.labels_button.setEnabled(False)
-            self.labels_button.setToolTip('Detection labels · start with --yolo-model to enable')
         row.addWidget(self.labels_button)
         self.fullscreen_button = QtWidgets.QToolButton()
         self.fullscreen_button.setIconSize(QtCore.QSize(16, 16))
@@ -708,7 +726,6 @@ class Studio(QtWidgets.QMainWindow):
             panel.roi_changed.connect(self._roi_changed)
             panel.view_requested.connect(self.change_view)
             panel.set_waiting_text(self._listen_text())
-            panel.set_detections_enabled(bool(self.args.yolo_model))
             panel.set_annotation_options(self.annotation_options)
             self.cameras.addWidget(panel)
         self.cameras.setSizes([700, 700])
@@ -740,7 +757,6 @@ class Studio(QtWidgets.QMainWindow):
         self.telemetry = self.diagnostics.telemetry
         self.analysis.tab_changed.connect(self._analysis_tab_changed)
         self.analysis.limits_requested.connect(self._edit_limits)
-        self.analysis.detections.set_enabled(bool(self.args.yolo_model))
         self._update_limit_tooltips()
         dash.addWidget(kpis, 30)
         dash.addWidget(self.analysis, 70)
@@ -755,6 +771,7 @@ class Studio(QtWidgets.QMainWindow):
         # No persistent footer: shortcuts are listed in tooltips and the video hint.
         self.statusBar().hide()
         self.change_view('both')
+        self._update_detection_ui()
 
         shortcuts = [('1', lambda: self.change_view('both')),
                      ('2', lambda: self.change_view('left')),
@@ -763,13 +780,15 @@ class Studio(QtWidgets.QMainWindow):
                      ('Escape', self.showMaximized),
                      ('D', self.analysis.toggle_diagnostics),
                      ('P', self.analysis.toggle_pause),
-                     ('L', self._cycle_annotation_preset)]
+                     ('L', self._cycle_annotation_preset),
+                     ('M', self._toggle_model_popover)]
         for key, action in shortcuts:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(action)
         self.health_timer = QtCore.QTimer(self)
         self.health_timer.timeout.connect(self._poll_clock_sync)
         self.health_timer.timeout.connect(self._refresh_metrics)
+        self.health_timer.timeout.connect(self._poll_library)
         self.health_timer.start(100)
 
     def _set_image_button_active(self, active):
@@ -890,7 +909,9 @@ class Studio(QtWidgets.QMainWindow):
         layout = self.app_bar.layout()
         for show_brand, button_text in ((True, True), (False, True), (False, False)):
             self.brand_text.setVisible(show_brand)
-            for button, text in ((self.labels_button, 'Labels'), (self.image_button, 'Adjust image')):
+            self._button_text = button_text
+            for button, text in ((self.model_button, self._model_button_text()),
+                                 (self.labels_button, 'Labels'), (self.image_button, 'Adjust image')):
                 button.setText(text if button_text else '')
             layout.invalidate()
             if layout.minimumSize().width() <= self.width():
@@ -1062,12 +1083,25 @@ class Studio(QtWidgets.QMainWindow):
                 self.clock_chip.display('good', f'{self.clock_offset:+.1f} ms', detail)
 
     def _refresh_yolo_chip(self):
+        job = self.download_job
+        if job is not None and not job.finished:
+            self.yolo_chip.display('info', f'Downloading {int(job.fraction * 100)} %',
+                                   f'{job.name or "Model"} from {self.library.describe()}\n'
+                                   f'{format_size(job.done)} of {format_size(job.total)}')
+            return
         if not self.yolo:
-            self.yolo_chip.display('neutral', 'Off', 'Start with --yolo-model to enable detection')
+            hint = ('Choose a model with the Model button' if self.library is not None
+                    else 'Start with --model-library http://SERVER_IP:8765 or --yolo-model PATH')
+            if self.library_error and self.model_label is None:
+                self.yolo_chip.display('bad', 'Library error', f'{self.library_error}\n{hint}')
+            else:
+                self.yolo_chip.display('neutral', 'Off', hint)
             return
         a = self.args
         status = self.last_yolo_status
-        detail = (f'{status}\nModel {a.yolo_model} · confidence {a.yolo_conf:g} · '
+        source = (f'library {self.library.describe()}' if self.model_entry is not None and self.library
+                  else 'local file')
+        detail = (f'{status}\nModel {self.model_label} ({source}) · confidence {a.yolo_conf:g} · '
                   f'imgsz {a.yolo_imgsz} · device {a.yolo_device}')
         state = getattr(self.yolo, 'state', YoloState.READY)
         if state is YoloState.LOADING:
@@ -1218,10 +1252,7 @@ class Studio(QtWidgets.QMainWindow):
             self.args.port, self.args.transport, self.args.multicast_group,
             None, self.args.iface_ip, self.args.relay_port)
         self.reader.start()
-        if self.args.yolo_model:
-            self.yolo = YoloWorker(self.args.yolo_model, self.args.yolo_conf,
-                                   self.args.yolo_imgsz, self.args.yolo_device)
-            self.yolo.start()
+        self._start_initial_model()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(50)
@@ -1315,6 +1346,221 @@ class Studio(QtWidgets.QMainWindow):
         if first_frame or shape_before != self.left_panel.native_shape:
             self._schedule_layout()
 
+    # ---- YOLO model: local file or the camera server's model library ----------
+    def _start_initial_model(self):
+        spec = self.args.yolo_model
+        if spec and spec.lower().startswith('library:'):
+            self._load_library_model(name=spec.split(':', 1)[1].strip())
+        elif spec:
+            self._activate_model(spec, spec)
+        elif self.library is not None:
+            remembered = str(self._preferences.value('model/library_name', '') or '')
+            if remembered:
+                self._load_library_model(name=remembered)
+        if self.library is not None:
+            self._refresh_library_index()
+
+    def _model_short_name(self):
+        if self.model_entry is not None:
+            return self.model_entry.name
+        return Path(self.model_label).name if self.model_label else None
+
+    def _model_button_text(self):
+        job = self.download_job
+        if job is not None and not job.finished:
+            return f'{job.name or "Model"} · {int(job.fraction * 100)} %'
+        return self._model_short_name() or 'Model'
+
+    def _update_model_button(self):
+        text = self._model_button_text() if self._button_text else ''
+        if self.model_button.text() != text:
+            self.model_button.setText(text)
+        active = self.yolo is not None
+        self.model_button.setProperty('active', 'true' if active else 'false')
+        self.model_button.style().unpolish(self.model_button)
+        self.model_button.style().polish(self.model_button)
+        self.model_button.setIcon(icon('stack', COLORS['accent'] if active else COLORS['secondary']))
+        if self.library is not None:
+            tip = f'YOLO model from the library at {self.library.describe()}'
+        else:
+            tip = 'YOLO model · start with --model-library http://SERVER_IP:8765 to use the server library'
+        if self.model_label:
+            tip = f'Running {self.model_label}\n' + tip
+        self.model_button.setToolTip(tip + ' · shortcut M')
+
+    def _update_detection_ui(self):
+        enabled = self.yolo is not None
+        for panel in (self.left_panel, self.right_panel):
+            panel.set_detections_enabled(enabled)
+        self.analysis.detections.set_enabled(enabled)
+        self.labels_button.setEnabled(enabled)
+        self.labels_button.setToolTip(
+            'What detection labels show: class, ID, confidence, centre, size · shortcut L cycles presets'
+            if enabled else 'Detection labels · choose a YOLO model first')
+        self._update_model_button()
+
+    def _toggle_model_popover(self):
+        if self.model_popover is None:
+            if self.library is not None:
+                source = f'Library on the camera server: {self.library.describe()}'
+            else:
+                source = ('No model library configured. Start the client with '
+                          '--model-library http://SERVER_IP:8765 (and --library-via THIS_PC_IP to '
+                          'download over a specific network).')
+            self.model_popover = ModelPopover(source, self)
+            self.model_popover.model_chosen.connect(self._choose_model)
+            self.model_popover.refresh_requested.connect(self._refresh_library_index)
+            self.model_popover.detection_off.connect(self._turn_detection_off)
+            self.model_popover.refresh_button.setEnabled(self.library is not None)
+            if self.library is not None:
+                self.model_popover.set_cache_folder(self.library.cache_dir)
+        if self.model_popover.isVisible():
+            self.model_popover.close()
+            return
+        self._refresh_library_index()
+        self._render_model_popover()
+        self._place_under(self.model_popover, self.model_button)
+        self.model_popover.show()
+
+    def _refresh_library_index(self):
+        if self.library is None or (self._index_future is not None and not self._index_future.done()):
+            return
+        self._index_future = self._library_executor.submit(self.library.fetch_index)
+        self._render_model_popover()
+
+    def _poll_library(self):
+        """10 Hz: collect the library listing and download progress from their threads."""
+        future = self._index_future
+        if future is not None and future.done():
+            self._index_future = None
+            try:
+                self.library_entries = future.result()
+                self.library_error = None
+                self.library_offline = False
+            except LibraryError as exc:
+                self.library_error = str(exc)
+                self.library_entries = self.library.cached_index()
+                self.library_offline = True
+            self._render_model_popover()
+        job = self.download_job
+        if job is not None:
+            if job.finished:
+                self.download_job = None
+                if job.error:
+                    self.library_error = job.error
+                elif job.path is not None:
+                    self._activate_model(job.path, job.entry.name, job.entry)
+            self._update_model_button()
+        # While open, the rows follow loading / download progress live.
+        if self.model_popover is not None and self.model_popover.isVisible():
+            self._render_model_popover()
+
+    def _model_state(self, entry):
+        """(text, state, active) for one library row."""
+        job = self.download_job
+        if job is not None and not job.finished and job.name.lower() == entry.name.lower():
+            return f'Downloading {int(job.fraction * 100)} %', '', False
+        if self._is_active(entry):
+            state = getattr(self.yolo, 'state', YoloState.READY)
+            if state is YoloState.LOADING:
+                return '◌ Loading…', '', True
+            if state is YoloState.ERROR:
+                return '✕ Could not load', 'bad', True
+            return '● Active', 'good', True
+        if self.library is not None and self.library.cached_path(entry) is not None:
+            return 'Downloaded', '', False
+        return f'↓ {format_size(entry.size)}', '', False
+
+    def _render_model_popover(self):
+        popover = self.model_popover
+        if popover is None:
+            return
+        local = self.model_label if (self.yolo is not None and self.model_entry is None) else None
+        popover.set_entries(self.library_entries, local)
+        if self._index_future is not None:
+            popover.set_message('◌ Reading the library…')
+        elif self.library_error:
+            error = self.library_error.rstrip()
+            if not error.endswith('.'):
+                error += '.'
+            suffix = ' Showing the last saved list.' if self.library_offline and self.library_entries else ''
+            popover.set_message(f'✕ {error}{suffix}', 'bad')
+        else:
+            popover.set_message('')
+        states = {e.name: self._model_state(e) for e in self.library_entries}
+        if local:
+            states['local'] = ('● Active', 'good', True)
+        popover.update_states(states)
+        popover.off_button.setEnabled(self.yolo is not None or self.download_job is not None)
+
+    def _is_active(self, entry):
+        return (self.yolo is not None and self.model_entry is not None
+                and self.model_entry.name == entry.name and self.model_entry.sha256 == entry.sha256)
+
+    def _choose_model(self, entry):
+        if self._is_active(entry) and getattr(self.yolo, 'state', None) is not YoloState.ERROR:
+            return  # already running
+        job = self.download_job
+        if job is not None and not job.finished:
+            if job.name.lower() == entry.name.lower():
+                return
+            job.cancel.set()
+            self.download_job = None
+        self._load_library_model(entry=entry)
+
+    def _load_library_model(self, name=None, entry=None):
+        if self.library is None:
+            self.library_error = 'library:NAME needs --model-library http://SERVER_IP:8765'
+            return
+        self.library_error = None
+        cached = self.library.cached_path(entry) if entry is not None else None
+        if cached is not None:
+            self._activate_model(cached, entry.name, entry)
+            return
+        self.download_job = DownloadJob(self.library, name=name or entry.name, entry=entry).start()
+        self._update_model_button()
+        self._render_model_popover()
+
+    def _activate_model(self, path, label, entry=None):
+        """Switch detection to a model file now; ROIs carry over, old boxes are dropped."""
+        if self.yolo:
+            self.yolo.stop()
+        a = self.args
+        self.yolo = YoloWorker(str(path), a.yolo_conf, a.yolo_imgsz, a.yolo_device)
+        for panel in (self.left_panel, self.right_panel):
+            if panel.bounds is not None:
+                self.yolo.set_roi(panel.side, panel.bounds)
+        self.yolo.start()
+        self.model_label = str(label)
+        self.model_entry = entry
+        self.last_yolo_ms = None
+        self.last_yolo_status = 'Loading YOLO...'
+        self.last_detections = ()
+        self.last_detection_count = 0
+        for panel in (self.left_panel, self.right_panel):
+            panel.set_detections(())
+        if entry is not None:
+            self._preferences.setValue('model/library_name', entry.name)
+        self._update_detection_ui()
+        self._render_model_popover()
+
+    def _turn_detection_off(self):
+        if self.download_job is not None:
+            self.download_job.cancel.set()
+            self.download_job = None
+        if self.yolo:
+            self.yolo.stop()
+        self.yolo = None
+        self.model_label = None
+        self.model_entry = None
+        self.last_detections = ()
+        self.last_detection_count = 0
+        for panel in (self.left_panel, self.right_panel):
+            panel.set_detections(())
+        self._preferences.remove('model/library_name')
+        self._update_detection_ui()
+        self._render_model_popover()
+
     def closeEvent(self, event):
         self._closing = True
         if hasattr(self, 'timer'):
@@ -1326,6 +1572,11 @@ class Studio(QtWidgets.QMainWindow):
         if self.image_dialog is not None:
             self.image_dialog.close()
         self._sync_executor.shutdown(wait=False, cancel_futures=True)
+        self._library_executor.shutdown(wait=False, cancel_futures=True)
+        if self.download_job is not None:
+            self.download_job.cancel.set()
+        if self.model_popover is not None:
+            self.model_popover.close()
         if self.yolo:
             self.yolo.stop()
         if self.reader:
@@ -1345,7 +1596,16 @@ def build_parser():
     p.add_argument('--ntp-samples', type=int, default=7)
     p.add_argument('--clock-offset-ms', type=float, default=0)
     p.add_argument('--no-time-sync', action='store_true')
-    p.add_argument('--yolo-model', default=None)
+    p.add_argument('--yolo-model', default=None,
+                   help='YOLO model file on this PC, or library:NAME for a model from --model-library')
+    p.add_argument('--model-library', default=None,
+                   help='Model library on the camera server, e.g. http://SERVER_IP:8765. Use the '
+                        'server address on the network that does NOT carry the video.')
+    p.add_argument('--library-via', default=None,
+                   help="This PC's IP on the network to download models over (e.g. its Wi-Fi IP). "
+                        'Needed when two adapters share one subnet.')
+    p.add_argument('--model-cache', default=None,
+                   help='Folder for downloaded models (default %%LOCALAPPDATA%%\\StereoVisionStudio\\models)')
     p.add_argument('--yolo-conf', type=float, default=0.35)
     p.add_argument('--yolo-imgsz', type=int, default=640)
     p.add_argument('--yolo-device', default='auto')
@@ -1553,8 +1813,31 @@ def self_test():
     analysis.toggle_pause()
     analysis.set_detections_side(None)
     assert analysis.current == 'delay' and not analysis.tabs.buttons['detections'].isVisibleTo(analysis)
+    # Model picker: rows, per-model state and choosing a model.
+    from model_library import ModelEntry
+    sha_a, sha_b = 'a' * 64, 'b' * 64
+    belt = ModelEntry('belt-v3', 'belt-v3.pt', sha_a, 5_400_000, classes=('box', 'can'), added='2026-11-24 10:00')
+    old = ModelEntry('belt-v2', 'belt-v2.pt', sha_b, 5_100_000)
+    picker = ModelPopover('Library on the camera server: http://192.168.0.102:8765')
+    chosen = []
+    picker.model_chosen.connect(chosen.append)
+    picker.set_entries([belt, old], local_label=None)
+    assert set(picker.rows) == {'belt-v3', 'belt-v2'}
+    row = picker.rows['belt-v3']
+    assert 'box, can' in row.detail.text() and '5.1 MB' in row.detail.text()
+    picker.update_states({'belt-v3': ('● Active', 'good', True), 'belt-v2': ('Downloading 40 %', '', False)})
+    assert row.property('active') == 'true'
+    assert picker.rows['belt-v2'].state.text() == 'Downloading 40 %'
+    picker.rows['belt-v2'].clicked.emit()
+    assert chosen == [old]
+    same_file = ModelEntry('belt-copy', 'belt-copy.pt', sha_a, 5_400_000)
+    picker.set_entries([belt, same_file], local_label='C:/models/best.pt')
+    assert picker.local_row is not None and set(picker.rows) == {'belt-v3', 'belt-copy'}, \
+        'two names for one file stay two rows'
+    picker.set_message('✕ Cannot reach the model library', 'bad')
+    assert picker.message.isVisibleTo(picker)
     print('PASS: Qt control-room, ROI, timing, image adjustments, detection labels, '
-          'status limits and detections table')
+          'status limits, detections table and model picker')
     return 0
 
 
@@ -1565,6 +1848,13 @@ def main():
         p.error('Multicast requires --iface-ip LOCAL_ETHERNET_IP')
     if not 0 < args.yolo_conf <= 1:
         p.error('YOLO confidence must be in (0,1]')
+    if args.yolo_model and args.yolo_model.lower().startswith('library:') and not args.model_library:
+        p.error('--yolo-model library:NAME needs --model-library http://SERVER_IP:8765')
+    if args.model_library:
+        try:
+            LibraryClient(args.model_library)
+        except ValueError as exc:
+            p.error(str(exc))
     app = QtWidgets.QApplication(sys.argv[:1])
     apply_theme(app)
     if args.self_test:
