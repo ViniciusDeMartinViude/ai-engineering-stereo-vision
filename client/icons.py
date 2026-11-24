@@ -97,6 +97,17 @@ def _stack(p):
     p.drawPolyline([_P(1.5, 11.5), _P(8, 15), _P(14.5, 11.5)])
 
 
+def _level(p):
+    """Spirit level: a vial with its bubble centred between two marks."""
+    p.drawRoundedRect(QtCore.QRectF(1.5, 5, 13, 6), 3, 3)
+    p.drawLine(_P(5.6, 6.5), _P(5.6, 9.5))
+    p.drawLine(_P(10.4, 6.5), _P(10.4, 9.5))
+    p.save()
+    p.setBrush(p.pen().color())
+    p.drawEllipse(_P(8, 8), 1.2, 1.2)
+    p.restore()
+
+
 def _logo(p):
     """Two overlapping lenses: the stereo pair."""
     p.drawEllipse(_P(5.6, 8), 4.4, 4.4)
@@ -124,6 +135,7 @@ _PAINTERS = {
     "copy": _copy,
     "camera": _camera,
     "stack": _stack,
+    "level": _level,
     "logo": _logo,
 }
 
