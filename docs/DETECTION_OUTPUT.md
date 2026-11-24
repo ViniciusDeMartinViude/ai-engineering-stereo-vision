@@ -43,13 +43,15 @@ python tools/receive_detections.py --host 0.0.0.0  # also accept messages from o
 python tools/receive_detections.py --raw           # print every message as JSON
 ```
 
-It prints each frame's objects per camera with a speed in pixels per second, from a simple nearest-object match between consecutive frames:
+It prints each frame's objects per camera with their track ID and the velocity the client measured, in mm/s when that camera has a scale and px/s otherwise. For example, with the belt running:
 
 ```
 15:27:07 seq 177504 566 ms after capture
-   left: Sugaey 88% @(231,191) v=(+0,+0) px/s; Nabtat-Ali 37% @(168,367) v=(+5,-2) px/s
-   right: -
+   left: #1 Ajwa 94% @(60,208) v=(+142,-3) mm/s; #2 Nabtat-Ali 82% @(168,367) v=(+139,+1) mm/s
+   right: #1 Galaxy 54% @(585,409) v=(+276,-4) px/s
 ```
+
+For messages without velocities, it falls back to a simple speed estimate of its own: the nearest object of the same class in the previous frame.
 
 ## Message format (version 1)
 
@@ -76,11 +78,13 @@ All times are **milliseconds since 1970 (UTC) in the camera server's clock**. Th
       "level_deg": 0.0,
       "roi": null,
       "objects": [
-        { "class_id": 3, "label": "Sugaey", "conf": 0.88,
-          "box": [184.2, 138.0, 278.9, 245.1], "center": [231.6, 191.6] }
-      ]
+        { "class_id": 0, "label": "Ajwa", "conf": 0.94,
+          "box": [28.4, 170.6, 90.7, 245.3], "center": [59.5, 207.9],
+          "track_id": 1, "velocity_px_s": [284.0, -6.2], "velocity_mm_s": [142.0, -3.1] }
+      ],
+      "mm_per_px": 0.5
     },
-    "right": { "size": [640, 480], "level_deg": 0.0, "roi": null, "objects": [] }
+    "right": { "size": [640, 480], "level_deg": 0.0, "roi": null, "mm_per_px": null, "objects": [] }
   }
 }
 ```
@@ -107,6 +111,10 @@ All times are **milliseconds since 1970 (UTC) in the camera server's clock**. Th
 | `conf` | Confidence, 0–1 |
 | `box` | `[x1, y1, x2, y2]` in pixels, origin top-left, y down |
 | `center` | Centre of the box `[x, y]` |
+| `track_id` | The object's ID from Ultralytics ByteTrack, run per camera. It stays the same while the object stays in view, so you can follow one object across messages. IDs are per camera: left #1 and right #1 are unrelated. `null` for a detection the tracker hasn't confirmed yet. |
+| `velocity_px_s` | `[vx, vy]` in image pixels per second (x right, y down). It's the object's displacement over the last ~0.7 s divided by the time between those frames' capture times. `null` until the object has been tracked for 0.15 s. |
+| `velocity_mm_s` | The same in mm/s, when that camera has a scale (`mm_per_px`). Otherwise `null`. |
+| `mm_per_px` | The camera's scale, set with **Speed ▸ Set scale…** in the client, or `null` |
 
 A frame where nothing is detected still produces a message with empty `objects`. So "no objects" is different from "no messages".
 
@@ -123,15 +131,15 @@ Sent once a second while no `detections` message has gone out for a second:
 
 ## Things to know when building the backend
 
-- **No object IDs.** YOLO reports "a Galaxy at (x, y)" in each frame, not "the same Galaxy as before". Match objects between frames yourself. On a conveyor, the nearest object of the same class, moving in the belt direction, works well. Smooth speeds over several frames.
-- **Pixels, not millimetres.** Speeds are in px/s until the cameras are calibrated. For a flat belt, measuring four points of known position on the belt plane gives an image-to-belt conversion (a homography).
+- **Track IDs and velocities are provided** (`track_id`, `velocity_px_s`, `velocity_mm_s`). A track can be lost and restarted with a new ID, for example when an object is hidden for a moment or the camera is levelled again. So keep your own short memory of where objects were, and filter speeds over time if they are noisy.
+- **Millimetres need a scale.** `velocity_mm_s` uses one scale per camera, measured on the belt with **Set scale…**. It's accurate for objects on the belt plane, in the middle of the image. Lens distortion and perspective make it less accurate near the edges. For a precise image-to-belt conversion, measure four points of known position on the belt (a homography).
 - **Two cameras, two views.** Each camera reports its own detections in its own pixels. Using both together (for example for height or position from stereo) needs the stereo calibration that is still to be done.
 - **Message size.** Typically 0.5–3 kB, well below the 64 kB UDP limit. Read with a 64 kB buffer.
 - **Rate.** At most one message per processed frame: up to the video rate (~10 fps) with a fast model, fewer with a slow one (about 5–6 per second with the 131 MB model on CPU).
 
 ## Tested
 
-- 7 unit tests in `tests/test_detection_output.py`:
+- 8 unit tests in `tests/test_detection_output.py`, including track IDs, velocities and the scale in the message:
   - Destination parsing.
   - The message fields, times converted to the server clock, objects sorted and capped.
   - Frames with an unreadable timestamp.
@@ -140,4 +148,5 @@ Sent once a second while no `detections` message has gone out for a second:
 - Live on the camera PC with the real stream and the library's `firstry.pt` model on CPU:
   - 5.5 messages per second reached `receive_detections.py` with no send errors, and the Output panel showed them.
   - Stopping the receiver turned the pill to **No listener** within 2 s.
-- Not yet tested: a backend on another PC, and a moving belt.
+- With object speed on, every object in 22 messages over 4 s carried a track ID and a velocity. Each object kept one ID throughout.
+- Not yet tested: a backend on another PC, and a moving belt (speeds were near 0).

@@ -19,10 +19,16 @@ import concurrent.futures
 import dataclasses
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
+# PyTorch (YOLO) ships Intel OpenMP; conda's NumPy/MKL would load LLVM OpenMP on its
+# first linear-algebra call (ByteTrack's Kalman filter), and two OpenMP runtimes in one
+# process abort it ("OMP: Error #15"). Single-threaded MKL loads no OpenMP at all; its
+# matrices here are tiny. Must be set before NumPy is imported.
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -38,6 +44,8 @@ from loupe import Loupe, loupe_zoom
 from detection_output import (DEFAULT_TARGET, DetectionPublisher, detection_message, parse_target,
                               status_message)
 from output_panel import OutputChip, OutputPopover, output_pill
+from speed_estimation import (STILL_PX_S, SpeedEstimator, format_speed, load_speed_settings,
+                              save_speed_settings, speed_of)
 from camera_level import (format_angle, level_stereo_frame, line_correction, load_angles,
                           normalize_angle, save_angle)
 from seven_segment import SevenSegmentDisplay, format_three_digits
@@ -95,6 +103,7 @@ class DrawViewBox(pg.ViewBox):
         super().__init__(enableMenu=False, lockAspect=True, invertY=True)
         self.start = None
         self.mode = 'roi'
+        self.line_purpose = 'level'   # what a line drag is for: 'level' or 'scale'
         self.line_preview = QtWidgets.QGraphicsLineItem()
         self.line_preview.setPen(pg.mkPen(COLORS['accent'], width=2.5))
         self.line_preview.setZValue(100)
@@ -167,9 +176,12 @@ class DrawViewBox(pg.ViewBox):
         if self.mode == 'line':
             self.line_preview.setLine(x0, y0, x1, y1)
             self.line_preview.show()
-            correction = line_correction(x0, y0, x1, y1)
-            self.preview_label.setText(' Keep drawing along the belt ' if correction is None
-                                       else f' Tilt {format_angle(abs(correction))} ')
+            if self.line_purpose == 'scale':
+                self.preview_label.setText(f' {float(np.hypot(x1 - x0, y1 - y0)):.0f} px ')
+            else:
+                correction = line_correction(x0, y0, x1, y1)
+                self.preview_label.setText(' Keep drawing along the belt ' if correction is None
+                                           else f' Tilt {format_angle(abs(correction))} ')
             self.preview_label.setPos(x1, y1)
             self.preview_label.show()
             if event.isFinish():
@@ -205,6 +217,8 @@ class DrawViewBox(pg.ViewBox):
 class CameraPanel(QtWidgets.QFrame):
     roi_changed = QtCore.Signal(str, object)
     level_changed = QtCore.Signal(str, float)
+    speed_display_changed = QtCore.Signal(str, bool)
+    scale_changed = QtCore.Signal(str, float)   # mm per pixel; 0 = no scale
     view_requested = QtCore.Signal(str)
     HINT = ('<b>Drag</b> set ROI &nbsp;·&nbsp; <b>Right-drag</b> pan &nbsp;·&nbsp; '
             '<b>Wheel</b> zoom &nbsp;·&nbsp; <b>Double-click</b> clear ROI')
@@ -216,6 +230,9 @@ class CameraPanel(QtWidgets.QFrame):
     LEVEL_HELP = ('Level this camera: click, then drag a line along the conveyor.\n'
                   'The image turns so that line is horizontal (or vertical, if it was closer\n'
                   'to vertical). Draw again on the levelled image to fine-tune.')
+    SCALE_HINT = ('<b>Drag along something of known length</b> on the belt &nbsp;·&nbsp; '
+                  '<b>Esc</b> cancels')
+    ARROW_AHEAD_S = 0.5   # speed arrows point where the object will be this much later
 
     def __init__(self, side, color, parent=None):
         super().__init__(parent)
@@ -225,6 +242,11 @@ class CameraPanel(QtWidgets.QFrame):
         self.roi_box = None
         self.bounds = None
         self.angle = 0.0
+        self.show_speed = False
+        self.mm_per_px = None
+        self._velocities = {}
+        self._line_purpose = 'level'
+        self.arrow_items = []
         self._rgb = None
         self._loupe_view = None
         self._updating = False
@@ -278,6 +300,23 @@ class CameraPanel(QtWidgets.QFrame):
         self.level_button.setIconSize(QtCore.QSize(16, 16))
         self.level_button.setToolTip(self.LEVEL_HELP)
         self.level_button.toggled.connect(self.start_levelling)
+        # Speed: click to show each tracked object's speed; the menu sets the scale.
+        self.speed_button = QtWidgets.QToolButton()
+        self.speed_button.setCheckable(True)
+        self.speed_button.setIcon(icon('gauge', COLORS['secondary']))
+        self.speed_button.setIconSize(QtCore.QSize(16, 16))
+        self.speed_button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.speed_button.toggled.connect(lambda on: self.set_show_speed(on, emit=True))
+        menu = QtWidgets.QMenu(self.speed_button)
+        self.speed_action = menu.addAction('Show object speeds')
+        self.speed_action.setCheckable(True)
+        self.speed_action.toggled.connect(lambda on: self.set_show_speed(on, emit=True))
+        menu.addSeparator()
+        self.scale_info_action = menu.addAction('')
+        self.scale_info_action.setEnabled(False)
+        menu.addAction('Set scale… (drag along a known length)', self.start_scaling)
+        self.clear_scale_action = menu.addAction('Clear scale', lambda: self.set_scale(None, emit=True))
+        self.speed_button.setMenu(menu)
         self.hud_label = QtWidgets.QLabel('')
         self.hud_label.setObjectName('hud')
         self.hud_label.setFont(numeric_font(12))
@@ -307,11 +346,12 @@ class CameraPanel(QtWidgets.QFrame):
         hdr.addSpacing(4)
         hdr.addWidget(self.fit_button)
         hdr.addWidget(self.level_button)
+        hdr.addWidget(self.speed_button)
         hdr.addWidget(self.view_toggle)
         layout.addWidget(header)
         self._header_widgets = (badge, self.title, self.detect_count, self.info, self.roi_clear,
                                 self.level_info, self.level_clear, self.hud_label, self.fit_button,
-                                self.level_button, self.view_toggle)
+                                self.level_button, self.speed_button, self.view_toggle)
 
         video = QtWidgets.QWidget()
         grid = QtWidgets.QGridLayout(video)
@@ -383,6 +423,7 @@ class CameraPanel(QtWidgets.QFrame):
         self.vbox.sigRangeChanged.connect(self._range_changed)
         self.overlay.show_state('info', '◌', 'Waiting for video', self._waiting_text)
         self.set_view_mode('both')
+        self.set_scale(None, emit=False)
 
     def eventFilter(self, obj, event):
         if obj is self.graphics:
@@ -505,6 +546,8 @@ class CameraPanel(QtWidgets.QFrame):
         caption = f'x {px}  y {py}'
         if anchor is not None and mode == 'roi':
             caption = f'{int(abs(x - anchor[0]))} × {int(abs(y - anchor[1]))} px'
+        elif anchor is not None and self._line_purpose == 'scale':
+            caption = f'{float(np.hypot(x - anchor[0], y - anchor[1])):.0f} px'
         elif anchor is not None:
             correction = line_correction(anchor[0], anchor[1], x, y)
             if correction is not None:
@@ -531,6 +574,8 @@ class CameraPanel(QtWidgets.QFrame):
             self.level_button.blockSignals(True)
             self.level_button.setChecked(on)
             self.level_button.blockSignals(False)
+        if on:
+            self._line_purpose = self.vbox.line_purpose = 'level'
         self.vbox.set_mode('line' if on else 'roi')
         self.level_button.setIcon(icon('level', COLORS['accent'] if on else COLORS['secondary']))
         if on:
@@ -542,8 +587,18 @@ class CameraPanel(QtWidgets.QFrame):
             self.hint.setText(self.HINT)
 
     def _line_drawn(self, line):
-        correction = line_correction(*line)
+        purpose = self._line_purpose
         self.start_levelling(False)
+        if purpose == 'scale':
+            length = float(np.hypot(line[2] - line[0], line[3] - line[1]))
+            if length < 40:
+                self.hint.setText('Line too short · use Set scale again and drag a longer known length')
+                self.hint.show()
+                self._hint_timer.start()
+                return
+            self._ask_scale(length)
+            return
+        correction = line_correction(*line)
         if correction is None:
             self.hint.setText('Line too short · click Level and drag further along the conveyor')
             self.hint.show()
@@ -554,6 +609,74 @@ class CameraPanel(QtWidgets.QFrame):
     def reset_level(self):
         self.start_levelling(False)
         self.set_angle(0.0, emit=True)
+
+    # ---- Speed: tracked objects' velocity, in mm/s once a scale is set ---------
+    def set_show_speed(self, on, emit):
+        on = bool(on)
+        for widget in (self.speed_button, self.speed_action):
+            if widget.isChecked() != on:
+                widget.blockSignals(True)
+                widget.setChecked(on)
+                widget.blockSignals(False)
+        self.speed_button.setIcon(icon('gauge', COLORS['accent'] if on else COLORS['secondary']))
+        changed = on != self.show_speed
+        self.show_speed = on
+        self._update_speed_tooltip()
+        if changed:
+            self.set_detections(self._last_detections)
+            if emit:
+                self.speed_display_changed.emit(self.side, on)
+
+    def start_scaling(self):
+        """Arm a line drag along something of known length; then ask for that length."""
+        if not self._has_image:
+            return
+        self.start_levelling(False)
+        self._line_purpose = self.vbox.line_purpose = 'scale'
+        self.vbox.set_mode('line')
+        self._hint_timer.stop()
+        self.hint.setText(self.SCALE_HINT)
+        self.hint.show()
+
+    def _ask_scale(self, length_px):
+        mm, ok = QtWidgets.QInputDialog.getDouble(
+            self, 'Set scale', f'You drew {length_px:.0f} px on the {self.side.lower()} camera.\n'
+            'How long is it on the belt, in millimetres?', 100.0, 0.1, 100000.0, 1)
+        if ok:
+            self.apply_scale(length_px, mm)
+
+    def apply_scale(self, length_px, length_mm):
+        self.set_scale(length_mm / length_px, emit=True)
+        if not self.show_speed:
+            self.set_show_speed(True, emit=True)
+
+    def set_scale(self, mm_per_px, emit):
+        self.mm_per_px = float(mm_per_px) if mm_per_px else None
+        self.scale_info_action.setText(f'Scale: {self.mm_per_px:.3f} mm per pixel' if self.mm_per_px
+                                       else 'No scale: speeds in pixels per second')
+        self.clear_scale_action.setEnabled(self.mm_per_px is not None)
+        self._update_speed_tooltip()
+        self.set_detections(self._last_detections)
+        if emit:
+            self.scale_changed.emit(self.side, self.mm_per_px or 0.0)
+
+    def _update_speed_tooltip(self):
+        unit = (f'mm/s (scale {self.mm_per_px:.3f} mm/px)' if self.mm_per_px
+                else 'px/s (set a scale in this menu for mm/s)')
+        self.speed_button.setToolTip(
+            f'{"Hide" if self.show_speed else "Show"} object speeds on this camera, in {unit}.\n'
+            'Objects are tracked (Ultralytics ByteTrack) and timed with each frame\'s capture time;\n'
+            'arrows point where each object will be in half a second.')
+
+    def set_velocities(self, velocities):
+        """{track_id: (vx, vy)} in px/s for this camera's tracked objects."""
+        self._velocities = velocities
+
+    def _speed_text(self, d):
+        if d.track_id < 0:
+            return ''
+        velocity = self._velocities.get(d.track_id)
+        return f'#{d.track_id} · ' + ('measuring' if velocity is None else format_speed(velocity, self.mm_per_px))
 
     def set_angle(self, angle, emit):
         """Show this camera's rotation; with emit, ask the window to apply it."""
@@ -696,6 +819,8 @@ class CameraPanel(QtWidgets.QFrame):
             rect.setRect(x1, y1, max(1, x2-x1), max(1, y2-y1))
             rect.setVisible(True)
             text = format_detection_label(d, options)
+            if self.show_speed:
+                text = '\n'.join(part for part in (text, self._speed_text(d)) if part)
             label.setVisible(bool(text))
             if text:
                 label.fill = pg.mkBrush(color)
@@ -706,6 +831,7 @@ class CameraPanel(QtWidgets.QFrame):
                 flip = x1 + label_w > w and x2 - label_w >= 0
                 label.setAnchor((1 if flip else 0, 1 if y1 > 0.04 * h else 0))
                 label.setPos(x2 if flip else x1, y1)
+        self._draw_speed_arrows(drawn if self.show_speed else [], data_per_pixel)
         if options.center_marker and drawn:
             self.center_markers.setData(
                 pos=[d.center for d in drawn], symbol='crosshair', size=17,
@@ -724,6 +850,38 @@ class CameraPanel(QtWidgets.QFrame):
                                          + '\n\nLabel details: Labels button or shortcut L')
             set_state(self.detect_count, 'active' if count else '')
             self._fit_header()
+
+
+    def _draw_speed_arrows(self, drawn, data_per_pixel):
+        """An arrow from each moving object's centre to where it will be ARROW_AHEAD_S later."""
+        moving = []
+        for d in drawn:
+            velocity = self._velocities.get(d.track_id) if d.track_id >= 0 else None
+            if velocity is not None and speed_of(velocity) >= STILL_PX_S:
+                moving.append((d, velocity))
+        while len(self.arrow_items) < len(moving):
+            item = QtWidgets.QGraphicsPathItem()
+            item.setZValue(23)
+            item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            self.vbox.addItem(item, ignoreBounds=True)
+            self.arrow_items.append(item)
+        head = 9.0 * data_per_pixel
+        for i, item in enumerate(self.arrow_items):
+            if i >= len(moving):
+                item.setVisible(False)
+                continue
+            d, (vx, vy) = moving[i]
+            cx, cy = d.center
+            ex, ey = cx + vx * self.ARROW_AHEAD_S, cy + vy * self.ARROW_AHEAD_S
+            angle = np.arctan2(ey - cy, ex - cx)
+            path = QtGui.QPainterPath(QtCore.QPointF(cx, cy))
+            path.lineTo(ex, ey)
+            for side in (-0.45, 0.45):
+                path.moveTo(ex, ey)
+                path.lineTo(ex - head * np.cos(angle + side), ey - head * np.sin(angle + side))
+            item.setPath(path)
+            item.setPen(pg.mkPen(class_color(d.label), width=3))
+            item.setVisible(True)
 
 
 class Studio(QtWidgets.QMainWindow):
@@ -794,6 +952,10 @@ class Studio(QtWidgets.QMainWindow):
             self.publisher = DetectionPublisher(DEFAULT_TARGET, enabled)
         self._output_sent_seen = 0
         self.output_popover = None
+        # Object speed per camera, from track IDs and capture times (updated on the YOLO thread).
+        self._speed_lock = threading.Lock()
+        self.speed_estimators = {'LEFT': SpeedEstimator(), 'RIGHT': SpeedEstimator()}
+        self.velocities = {'LEFT': {}, 'RIGHT': {}}
         if args.model_library:
             self.library = LibraryClient(args.model_library, cache_dir=args.model_cache,
                                          source_ip=args.library_via)
@@ -917,6 +1079,11 @@ class Studio(QtWidgets.QMainWindow):
             panel.roi_changed.connect(self._roi_changed)
             panel.level_changed.connect(self._level_changed)
             panel.set_angle(self.level_angles[panel.side], emit=False)
+            show_speed, scale = load_speed_settings(self._preferences, panel.side)
+            panel.set_scale(scale, emit=False)
+            panel.set_show_speed(show_speed, emit=False)
+            panel.speed_display_changed.connect(self._speed_settings_changed)
+            panel.scale_changed.connect(self._speed_settings_changed)
             panel.view_requested.connect(self.change_view)
             panel.set_waiting_text(self._listen_text())
             panel.set_annotation_options(self.annotation_options)
@@ -1145,6 +1312,16 @@ class Studio(QtWidgets.QMainWindow):
             self.yolo.set_roi(side, bounds)
         # ROI coordinates are already shown directly in the camera header.
 
+    def _speed_settings_changed(self, side, _value):
+        panel = self.left_panel if side == 'LEFT' else self.right_panel
+        save_speed_settings(self._preferences, side, panel.show_speed, panel.mm_per_px)
+
+    def _reset_speed(self, side=None):
+        with self._speed_lock:
+            for s in ([side] if side else ['LEFT', 'RIGHT']):
+                self.speed_estimators[s].reset()
+                self.velocities[s] = {}
+
     def _escape(self):
         """Esc cancels drawing a levelling line first, then leaves full screen."""
         drawing = [p for p in (self.left_panel, self.right_panel) if p.levelling()]
@@ -1158,8 +1335,10 @@ class Studio(QtWidgets.QMainWindow):
         self.level_angles[side] = angle
         save_angle(self._preferences, side, angle)
         panel = self.left_panel if side == 'LEFT' else self.right_panel
+        self._reset_speed(side)
         if self.yolo:
             self.yolo.set_roi(side, panel.bounds)  # clears results computed on the old image
+            self.yolo.reset_tracking(side)       # positions before and after aren't comparable
         if self.last_recv_frame is not None:
             # Show the new angle at once, even when the stream is paused or stalled.
             views = split_stereo(self._prepare_frame(self.last_recv_frame))
@@ -1520,6 +1699,10 @@ class Studio(QtWidgets.QMainWindow):
                 detections = ()  # stale results are hidden everywhere
             self.last_detections = tuple(detections)
             self.last_detection_count = len(detections)
+            with self._speed_lock:
+                velocities = dict(self.velocities)
+            self.left_panel.set_velocities(velocities['LEFT'])
+            self.right_panel.set_velocities(velocities['RIGHT'])
             self.left_panel.set_detections(detections)
             self.right_panel.set_detections(detections)
         diagnostics_open = self.diagnostics.contents.isVisible()
@@ -1750,6 +1933,7 @@ class Studio(QtWidgets.QMainWindow):
         if self.yolo:
             self.yolo.stop()
         a = self.args
+        self._reset_speed()  # the new worker starts new tracks
         self.yolo = YoloWorker(str(path), a.yolo_conf, a.yolo_imgsz, a.yolo_device,
                                on_result=self._on_yolo_result)
         for panel in (self.left_panel, self.right_panel):
@@ -1791,12 +1975,23 @@ class Studio(QtWidgets.QMainWindow):
         return self.last_clock_sync_mono is not None and not self.args.no_time_sync
 
     def _on_yolo_result(self, detections, frame_id, meta, inference_ms):
-        """YOLO worker thread: publish this frame's detections at once (UDP never blocks)."""
-        if meta is None or not self.publisher.enabled or self._closing:
+        """YOLO worker thread: update object speeds, then publish this frame at once (UDP never blocks)."""
+        if meta is None or self._closing:
+            return
+        stamp = meta.get('stamp')
+        with self._speed_lock:
+            for side in ('LEFT', 'RIGHT'):
+                capture = None if stamp is None else (stamp.left_utc_ms if side == 'LEFT'
+                                                      else stamp.right_utc_ms)
+                self.velocities[side] = self.speed_estimators[side].update(
+                    capture, [d for d in detections if d.side == side])
+            velocities = dict(self.velocities)
+        if not self.publisher.enabled:
             return
         self.publisher.publish(detection_message(
             self.publisher.source, meta, detections, inference_ms, self._model_short_name(),
-            self.clock_offset, self._clock_synced()))
+            self.clock_offset, self._clock_synced(), velocities=velocities,
+            scales={'LEFT': self.left_panel.mm_per_px, 'RIGHT': self.right_panel.mm_per_px}))
 
     def _detection_state(self):
         if not self.yolo:
@@ -2203,6 +2398,41 @@ def self_test():
     assert toggles == [False]
     output.set_target_error("'robot-pc' is not an IPv4 address")
     assert output.listener.property('state') == 'bad'
+    # Object speed: the per-camera Speed button, labels, arrows and the scale tool.
+    sp = CameraPanel('LEFT', '#70e4a6')
+    sp.set_image(np.zeros((480, 640, 3), dtype=np.uint8))
+    sp.set_annotation_options(PRESETS['standard'])
+    shown = []
+    sp.speed_display_changed.connect(lambda side, on: shown.append(on))
+    tracked = Detection('LEFT', 'box', 0.9, (100.0, 100.0, 160.0, 160.0), 2, 7)
+    sp.set_velocities({7: (200.0, 0.0)})
+    sp.set_detections([tracked])
+    assert sp.box_labels[0].textItem.toPlainText().strip() == 'box · 90%', 'speeds off by default'
+    assert not any(a.isVisible() for a in sp.arrow_items)
+    sp.speed_button.click()
+    assert sp.show_speed and sp.speed_action.isChecked() and shown == [True]
+    assert '#7 · 200 px/s' in sp.box_labels[0].textItem.toPlainText()
+    arrow = sp.arrow_items[0]
+    assert arrow.isVisible() and abs(arrow.path().elementAt(1).x - (130 + 200 * 0.5)) < 1e-6, \
+        'arrow ends where the object will be in 0.5 s'
+    sp.start_scaling()
+    assert sp.levelling() and sp.vbox.line_purpose == 'scale' and not sp.level_button.isChecked()
+    sp.apply_scale(400.0, 200.0)  # 400 px drawn along 200 mm: 0.5 mm/px
+    assert sp.mm_per_px == 0.5 and '#7 · 100 mm/s' in sp.box_labels[0].textItem.toPlainText()
+    assert sp.clear_scale_action.isEnabled() and '0.500 mm per pixel' in sp.scale_info_action.text()
+    sp.set_velocities({7: (1.0, 1.0)})
+    sp.set_detections([tracked])
+    assert '#7 · still' in sp.box_labels[0].textItem.toPlainText() and not sp.arrow_items[0].isVisible()
+    sp.set_velocities({})
+    sp.set_detections([tracked])
+    assert '#7 · measuring' in sp.box_labels[0].textItem.toPlainText()
+    sp.set_scale(None, emit=False)
+    assert sp.mm_per_px is None and not sp.clear_scale_action.isEnabled()
+    sp.start_levelling(True)
+    assert sp.vbox.line_purpose == 'level', 'Level resets the line purpose'
+    sp.start_levelling(False)
+    sp.speed_action.setChecked(False)
+    assert not sp.show_speed and not sp.speed_button.isChecked() and shown == [True, False]
     print('PASS: Qt control-room, ROI, timing, image adjustments, detection labels, '
           'status limits, detections table and model picker')
     return 0

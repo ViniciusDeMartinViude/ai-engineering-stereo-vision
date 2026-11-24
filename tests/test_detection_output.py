@@ -1,4 +1,6 @@
 """Detection output: message format, UDP publisher and the example receiver."""
+import os
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')  # before NumPy: see client/yolo_detector.py
 import json
 import socket
 import subprocess
@@ -27,8 +29,8 @@ def frame_meta(stamp=True, seq=7, recv_ms=CAPTURE_MS + 250):
             'rois': {'LEFT': (96, 168, 1351, 959), 'RIGHT': None}}
 
 
-def galaxy(x, side='LEFT', conf=0.94):
-    return Detection(side, 'Galaxy', conf, (x - 50.0, 400.0, x + 50.0, 500.0), 2)
+def galaxy(x, side='LEFT', conf=0.94, track_id=-1):
+    return Detection(side, 'Galaxy', conf, (x - 50.0, 400.0, x + 50.0, 500.0), 2, track_id)
 
 
 class UdpReceiver:
@@ -70,10 +72,27 @@ class MessageTest(unittest.TestCase):
         self.assertEqual(left['roi'], [96, 168, 1351, 959])
         self.assertEqual([o['conf'] for o in left['objects']], [0.94, 0.5], 'most confident first')
         self.assertEqual(left['objects'][0], {'class_id': 2, 'label': 'Galaxy', 'conf': 0.94,
-                                              'box': [550.0, 400.0, 650.0, 500.0], 'center': [600.0, 450.0]})
+                                              'box': [550.0, 400.0, 650.0, 500.0], 'center': [600.0, 450.0],
+                                              'track_id': None, 'velocity_px_s': None, 'velocity_mm_s': None})
+        self.assertIsNone(left['mm_per_px'])
         self.assertIsNone(right['roi'])
         self.assertEqual(len(right['objects']), 1)
         json.dumps(message)  # plain JSON types only
+
+    def test_track_ids_velocities_and_scale(self):
+        detections = [galaxy(600, track_id=7), galaxy(900, conf=0.5, track_id=8), galaxy(700, side='RIGHT', track_id=3)]
+        message = detection_message('PC', frame_meta(), detections, 30.0, 'm', 0.0, True,
+                                    velocities={'LEFT': {7: (200.0, -10.0)}, 'RIGHT': {3: (-150.0, 0.0)}},
+                                    scales={'LEFT': 0.5, 'RIGHT': None})
+        left, right = message['cameras']['left'], message['cameras']['right']
+        self.assertEqual(left['mm_per_px'], 0.5)
+        self.assertEqual(left['objects'][0]['track_id'], 7)
+        self.assertEqual(left['objects'][0]['velocity_px_s'], [200.0, -10.0])
+        self.assertEqual(left['objects'][0]['velocity_mm_s'], [100.0, -5.0])
+        self.assertEqual(left['objects'][1]['track_id'], 8)
+        self.assertIsNone(left['objects'][1]['velocity_px_s'], 'tracked but not measured yet')
+        self.assertEqual(right['objects'][0]['velocity_px_s'], [-150.0, 0.0])
+        self.assertIsNone(right['objects'][0]['velocity_mm_s'], 'no scale on the right camera')
 
     def test_unreadable_timestamp_and_empty_frames(self):
         message = detection_message('PC-11', frame_meta(stamp=False), [], 30.0, None, 0.0, False)

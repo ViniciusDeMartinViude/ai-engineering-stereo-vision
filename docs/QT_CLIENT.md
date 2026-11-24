@@ -98,6 +98,7 @@ With a general pretrained model, replace the model path with `yolo26n.pt` (Ultra
 - High-resolution image rendering with PyQtGraph and independent per-camera zoom / pan, plus a **Fit** button to reset the view
 - Mouse-only ROI per camera: **drag** to set (outside area is shaded), **double-click** or **×** to clear; native-coordinate cropping before YOLO
 - **Output** pill: publishes both cameras' detections as JSON over UDP for another program (e.g. a robot backend). It shows the send rate and ripples on each message; click it for the switch, destination and the latest message. See [Detection output](DETECTION_OUTPUT.md)
+- **Speed** per camera (gauge button in the camera header): shows each tracked object's speed on its label (`#7 · 142 mm/s`, or `still`), with an arrow to where it will be in half a second. See [Object speed](#object-speed)
 - **Magnifier** while you drag an ROI or a levelling line: a 200-pixel window in a corner of the camera tile enlarges the image around the pointer about 4× (up to 12× native pixels), without smoothing. The box or line you're drawing and a crosshair are drawn on top. It follows new frames, and it moves to another corner when the pointer or the drag's start point comes near it. Once **Level** is armed, it also shows while you hover, so you can place the start of the line.
 - **Level** per camera, for cameras that aren't square to the conveyor: click the spirit-level button, then drag a line along the conveyor, and the image turns so the belt runs straight (see [Levelling the cameras](#levelling-the-cameras))
 - Latest-frame asynchronous YOLO predictions with per-class colours on both cameras; **Labels** options show class name, class ID, confidence, box centre (x, y), box size and a centre marker (presets Minimal / Standard / Detailed)
@@ -130,6 +131,22 @@ What is turned:
 - It costs about 4 ms per frame for one 1920×1080 camera, and 6 ms for both, on the camera PC's CPU.
 
 This is a 2D rotation for viewing and detection, not stereo calibration. It doesn't correct lens distortion or perspective, and depth measurements will need a proper calibration later.
+
+## Object speed
+
+Click a camera's **Speed** button (the gauge, next to Level) to show how fast each detected object moves on that camera. The label gets a second line with its track number and speed, e.g. `#7 · 142 mm/s`. An arrow points from the object to where it will be half a second later. Objects slower than 4 px/s read `still`. A new object reads `measuring` for its first ~0.15 s.
+
+**Millimetres per second:** open the small arrow beside the Speed button, choose **Set scale…**, and drag along something of known length lying on the belt, such as a ruler or a box of known size. The magnifier helps you place both ends. Type its length in mm. That camera then shows mm/s. The scale is per camera, remembered on this PC, and **Clear scale** returns to px/s. The scale is right for objects on the belt plane. It's less exact near the image edges, because of lens distortion and perspective.
+
+How it's measured:
+- **Tracking:** each camera has its own Ultralytics ByteTrack tracker, so an object keeps the same number from frame to frame. Ultralytics' `model.track()` would share one tracker between the two images in a batch, mixing the cameras. So the client feeds each camera's detections to its own tracker, from the same single YOLO run. Tracking costs no measurable YOLO time.
+- **Speed:** the same measure as Ultralytics' `SpeedEstimator`, the displacement between the first and last position over a short history divided by the time between them. Two differences:
+  - Time comes from each frame's **camera capture timestamp**. `SpeedEstimator` counts frames at an assumed frame rate, which is wrong here because YOLO skips frames whenever it's slower than the video.
+  - The history is a rolling 0.7 s window, so the speed keeps updating. `SpeedEstimator` fixes each object's speed after its first frames.
+- Levelling a camera starts new tracks on it, because positions before and after the turn aren't comparable.
+- The speeds, track IDs and scale are also sent with the [detection output](DETECTION_OUTPUT.md).
+
+The client sets `MKL_THREADING_LAYER=SEQUENTIAL` when it starts. PyTorch brings Intel's OpenMP runtime, and conda's NumPy (MKL) would load LLVM's OpenMP on the tracker's first matrix operation. Two OpenMP runtimes in one process abort it ("OMP: Error #15"). Single-threaded MKL loads none, and its matrices here are tiny.
 
 ## Technical details
 

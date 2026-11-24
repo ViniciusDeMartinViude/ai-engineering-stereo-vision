@@ -4,10 +4,18 @@ No model is loaded unless the client was started with --yolo-model. Frames are
 never uploaded: Ultralytics operates locally on decoded numpy BGR images.
 The queue is depth one (latest frame wins) to avoid inference backlog.
 """
+import dataclasses
 import enum
+import os
 import threading
 import time
 from dataclasses import dataclass
+
+# PyTorch (YOLO) ships Intel OpenMP; conda's NumPy/MKL would load LLVM OpenMP on its
+# first linear-algebra call (ByteTrack's Kalman filter), and two OpenMP runtimes in one
+# process abort it ("OMP: Error #15"). Single-threaded MKL loads no OpenMP at all; its
+# matrices here are tiny. Must be set before NumPy is imported.
+os.environ.setdefault('MKL_THREADING_LAYER', 'SEQUENTIAL')
 
 import numpy as np
 
@@ -29,11 +37,48 @@ class Detection:
     confidence: float
     xyxy: tuple  # pixel coordinates within one source camera image
     class_id: int = -1  # model class index; -1 when unknown
+    track_id: int = -1  # Ultralytics ByteTrack ID, stable while the object stays in view; -1 = untracked
 
     @property
     def center(self):
         x1, y1, x2, y2 = self.xyxy
         return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+TRACKER_ERROR = None  # why tracking is unavailable, if it is
+
+
+def make_tracker():
+    """A fresh Ultralytics ByteTrack tracker with its default settings, or None if unavailable."""
+    global TRACKER_ERROR
+    try:
+        from ultralytics.trackers.byte_tracker import BYTETracker
+        from ultralytics.utils import YAML, IterableSimpleNamespace
+        from ultralytics.utils.checks import check_yaml
+        return BYTETracker(args=IterableSimpleNamespace(**YAML.load(check_yaml('bytetrack.yaml'))))
+    except Exception as exc:
+        TRACKER_ERROR = f'{type(exc).__name__}: {exc}'
+        return None
+
+
+def assign_track_ids(tracker, detections, image_shape):
+    """Feed one camera's detections to its tracker; return them with ``track_id`` set.
+
+    This is what ``model.track()`` does after each prediction, done per camera:
+    given a batch of images, ``model.track()`` shares one tracker between them,
+    which would mix the left and right cameras' objects. Call it every frame,
+    with an empty list too, so lost tracks age out.
+    """
+    if tracker is None:
+        return list(detections)
+    from ultralytics.engine.results import Boxes
+    rows = np.array([[*d.xyxy, d.confidence, max(d.class_id, 0)] for d in detections],
+                    dtype=np.float32).reshape(-1, 6)
+    tracks = tracker.update(Boxes(rows, image_shape[:2]))
+    ids = {}
+    for row in tracks:
+        ids[int(row[-1])] = int(row[4])
+    return [dataclasses.replace(d, track_id=ids.get(i, -1)) for i, d in enumerate(detections)]
 
 
 class YoloWorker:
@@ -61,6 +106,8 @@ class YoloWorker:
         self.failed_frames = 0
         self.rois = {'LEFT': None, 'RIGHT': None}
         self.roi_version = 0  # bumped on every ROI change
+        self.trackers = {}  # side -> ByteTrack tracker, created on the worker thread
+        self._reset_tracks = set()
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True, name="stereo-yolo")
@@ -76,6 +123,11 @@ class YoloWorker:
             self.detections = ()  # old boxes must never survive an ROI change
             self.result_mono = 0.0
             self.pending = None
+
+    def reset_tracking(self, side):
+        """Start new tracks for one camera (its image geometry changed, e.g. levelled)."""
+        with self.condition:
+            self._reset_tracks.add(side)
 
     def submit(self, frame, frame_id, meta=None):
         """Submit the latest stereo frame; ``meta`` travels with it to ``on_result``."""
@@ -124,6 +176,9 @@ class YoloWorker:
                     break
                 frame, fid, active_rois, version, meta = self.pending
                 self.pending = None
+                resets, self._reset_tracks = self._reset_tracks, set()
+            for side in resets:
+                self.trackers.pop(side, None)
             try:
                 found, inference_ms = self._infer(model, frame, active_rois)
             except Exception as exc:
@@ -186,14 +241,19 @@ class YoloWorker:
         for side, result, (origin_x, origin_y) in zip(
                 ("LEFT", "RIGHT"), results, offsets):
             names = result.names
-            if result.boxes is None:
-                continue
-            for box in result.boxes:
+            side_found = []
+            boxes = result.boxes if result.boxes is not None else ()
+            for box in boxes:
                 cls = int(box.cls[0].item())
                 conf = float(box.conf[0].item())
                 coords = box.xyxy[0].cpu().tolist()
                 coords = (float(coords[0]) + origin_x, float(coords[1]) + origin_y,
                           float(coords[2]) + origin_x, float(coords[3]) + origin_y)
                 name = names.get(cls, str(cls)) if isinstance(names, dict) else names[cls]
-                found.append(Detection(side, str(name), conf, coords, cls))
+                side_found.append(Detection(side, str(name), conf, coords, cls))
+            # Track in full-camera coordinates, so an ROI change keeps the tracks.
+            if side not in self.trackers:
+                self.trackers[side] = make_tracker()
+            found.extend(assign_track_ids(self.trackers[side], side_found,
+                                          source_images[side].shape))
         return found, inference_ms
